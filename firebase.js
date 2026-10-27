@@ -19,6 +19,10 @@ import {
   createUserWithEmailAndPassword,
   deleteUser,
   inMemoryPersistence,
+  verifyPasswordResetCode,
+  confirmPasswordReset,
+  checkActionCode,
+  applyActionCode,
 } from 'https://www.gstatic.com/firebasejs/13.1.0/firebase-auth.js';
 import {
   connectFirestoreEmulator,
@@ -59,6 +63,8 @@ export function firebaseError(error) {
     return new ClientError('이메일 형식을 확인해 주세요.', 400, code);
   if (code.includes('requires-recent-login'))
     return new ClientError('다시 로그인한 뒤 계정 변경을 시도해 주세요.', 401, code);
+  if (code.includes('expired-action-code') || code.includes('invalid-action-code'))
+    return new ClientError('만료되었거나 이미 사용한 링크입니다. 새 메일을 요청하세요.', 400, code);
   if (code.includes('permission-denied'))
     return new ClientError(
       '저장 권한, 행사 운영 상태 또는 요청 제한을 확인해 주세요. 입력 내용은 유지됩니다.',
@@ -272,11 +278,56 @@ export async function changeAdminPassword(currentPassword, nextPassword) {
 }
 export async function changeAdminEmail(currentPassword, email) {
   await withDeadline(
-    verifyBeforeUpdateEmail(await reauthenticateAdmin(currentPassword), email.trim()),
+    verifyBeforeUpdateEmail(
+      await reauthenticateAdmin(currentPassword),
+      email.trim(),
+      emailActionSettings(),
+    ),
   );
 }
 export async function resetAdminPassword(email) {
-  await withDeadline(sendPasswordResetEmail((await getClients()).adminAuth, email.trim()));
+  const { adminAuth } = await getClients();
+  adminAuth.languageCode = 'ko';
+  await withDeadline(sendPasswordResetEmail(adminAuth, email.trim(), emailActionSettings()));
+}
+function emailActionSettings() {
+  const base = new URL('../../', location.href);
+  const pages = ['write/admin/', 'typing/admin/'].map((path) => new URL(path, base));
+  const target = pages.find((page) => page.pathname === location.pathname) ?? pages[0];
+  if (location.hash === '#account') target.hash = '#account';
+  if (
+    ['localhost', '127.0.0.1'].includes(location.hostname) &&
+    new URLSearchParams(location.search).get('emulator') === '1'
+  )
+    target.searchParams.set('emulator', '1');
+  return { url: target.href, handleCodeInApp: false };
+}
+
+const emailOperations = {
+  verifyEmail: 'VERIFY_EMAIL',
+  verifyAndChangeEmail: 'VERIFY_AND_CHANGE_EMAIL',
+  recoverEmail: 'RECOVER_EMAIL',
+};
+export async function inspectEmailAction(mode, code) {
+  const { adminAuth } = await getClients();
+  if (mode === 'resetPassword')
+    return { email: await withDeadline(verifyPasswordResetCode(adminAuth, code)) };
+  if (!Object.hasOwn(emailOperations, mode))
+    throw new ClientError('지원하지 않는 이메일 링크입니다.', 400);
+  const result = await withDeadline(checkActionCode(adminAuth, code));
+  if (result.operation !== emailOperations[mode])
+    throw new ClientError('이메일 링크의 작업 종류가 일치하지 않습니다.', 400);
+  return { email: result.data.email };
+}
+export async function finishPasswordReset(code, password) {
+  if (password.length < 12) throw new ClientError('새 비밀번호는 12자 이상으로 입력하세요.', 400);
+  await withDeadline(confirmPasswordReset((await getClients()).adminAuth, code, password));
+}
+export async function finishEmailAction(mode, code) {
+  if (!Object.hasOwn(emailOperations, mode))
+    throw new ClientError('지원하지 않는 이메일 링크입니다.', 400);
+  await inspectEmailAction(mode, code);
+  await withDeadline(applyActionCode((await getClients()).adminAuth, code));
 }
 export async function createOperator(email, password) {
   const { db } = await adminContext();
