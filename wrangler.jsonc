@@ -1,0 +1,27 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "os26to27",
+  "pages_build_output_dir": "./dist",
+  "compatibility_date": "2026-10-27",
+  "compatibility_flags": ["nodejs_compat"],
+  "vars": { "EVENT_PHASE": "A" },
+  "d1_databases": [{
+    "binding": "DB",
+    "database_name": "osung-letters", // Existing physical database; keep its ID and data.
+    "database_id": "416e12bb-7970-43df-84f7-fd0e0556e1f8",
+    "migrations_dir": "migrations"
+  }],
+  "services": [{ "binding": "RATE_LIMITER", "service": "ohsung-rate-limiter" }],
+  "env": {
+    "preview": {
+      "vars": { "EVENT_PHASE": "B" },
+      "d1_databases": [{
+        "binding": "DB",
+        "database_name": "os26to27-preview",
+        "database_id": "8034b06a-9356-4fad-901b-cb34c1cd0ee2",
+        "migrations_dir": "migrations"
+      }],
+      "services": [{ "binding": "RATE_LIMITER", "service": "ohsung-rate-limiter" }]
+    }
+  }
+}
