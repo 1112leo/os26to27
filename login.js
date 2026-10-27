@@ -58,7 +58,7 @@ export function mountLogin({ container, adminPath, onStudent, onLogout, canLogou
     form.elements.credential.type = admin ? 'password' : 'text';
     form.elements.credential.maxLength = admin ? 4096 : 30;
     form.elements.credential.autocomplete = admin ? 'current-password' : 'off';
-    $('#admin-help').hidden = !admin;
+    $('#admin-help').hidden = true;
     form.elements.identity.focus();
   }
   $('#student-mode').addEventListener('click', () => setMode(false));
@@ -69,6 +69,7 @@ export function mountLogin({ container, adminPath, onStudent, onLogout, canLogou
     const values = new FormData(form);
     busy = true;
     error.hidden = true;
+    $('#admin-help').hidden = true;
     container.setAttribute('aria-busy', 'true');
     container.querySelectorAll('input, button').forEach((control) => {
       control.disabled = true;
@@ -91,7 +92,10 @@ export function mountLogin({ container, adminPath, onStudent, onLogout, canLogou
     } catch (reason) {
       error.textContent = errorMessage(reason);
       error.hidden = false;
-      if (admin) form.elements.credential.value = '';
+      if (admin) {
+        form.elements.credential.value = '';
+        $('#admin-help').hidden = false;
+      }
     } finally {
       busy = false;
       container.setAttribute('aria-busy', 'false');
