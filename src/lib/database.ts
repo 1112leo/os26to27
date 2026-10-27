@@ -12,12 +12,14 @@ import {
   Timestamp,
   updateDoc,
   writeBatch,
+  setDoc,
+  deleteDoc,
   type DocumentSnapshot,
   type Firestore,
 } from 'firebase/firestore';
-import type { EventConfig, Letter, TypingResult } from './types';
+import type { EventConfig, Letter, TypingResult, TypingChallenge, PublicLetter } from './types';
 import { normalizeText, unicodeLength, UUID_PATTERN, validateSubmission } from './validation';
-import { calculateScore } from '../typing/scoring';
+import { calculateScore, countKeystrokes } from '../typing/scoring';
 import { CHALLENGE } from '../typing/challenge';
 import { ClientError, withDeadline } from './firebase';
 
@@ -107,27 +109,33 @@ export async function submitLetter(db: Firestore, uid: string, input: unknown) {
   return createOnce(db, uid, value.submissionKey, 'letter', payload);
 }
 
-export function validateTypingResult(input: TypingResult): void {
+export function validateTypingResult(
+  input: TypingResult,
+  challenge = CHALLENGE as Pick<
+    TypingChallenge,
+    'challengeId' | 'practice' | 'referenceKeystrokes'
+  >,
+): void {
   if (
     !UUID_PATTERN.test(input.id) ||
     !normalizeText(input.participantId) ||
     !normalizeText(input.displayName) ||
     unicodeLength(input.participantId) > 30 ||
     unicodeLength(input.displayName) > 30 ||
-    input.challengeId !== CHALLENGE.challengeId ||
-    input.practice !== CHALLENGE.practice ||
+    input.challengeId !== challenge.challengeId ||
+    input.practice !== challenge.practice ||
     input.prizeReceived ||
     !Number.isFinite(Date.parse(input.completedAt)) ||
     input.elapsedMs > 3600000
   )
     throw new ClientError('타자 기록의 형식을 확인해 주세요.', 400, 'INVALID_RESULT');
-  const computed = calculateScore(CHALLENGE.referenceKeystrokes, input.elapsedMs, input.errors);
+  const computed = calculateScore(challenge.referenceKeystrokes, input.elapsedMs, input.errors);
   if (input.speed !== computed.speed || input.score !== computed.score)
     throw new ClientError('타수와 최종 점수 계산이 일치하지 않습니다.', 400, 'INVALID_SCORE');
 }
 
 export async function submitTyping(db: Firestore, uid: string, result: TypingResult) {
-  validateTypingResult(result);
+  validateTypingResult(result, await readChallenge(db, result.challengeId));
   const payload = {
     id: result.id,
     participantId: normalizeText(result.participantId),
@@ -215,37 +223,157 @@ export async function readTyping(db: Firestore): Promise<TypingResult[]> {
   });
 }
 
-export async function reviewLetter(db: Firestore, id: string, patch: Record<string, unknown>) {
+export type LetterEdit = Pick<
+  Letter,
+  'nickname' | 'content' | 'published_content' | 'status' | 'publish_order'
+>;
+
+function letterEdit(input: LetterEdit): LetterEdit {
+  const { value, error } = validateSubmission({
+    nickname: input.nickname ?? '',
+    content: input.content,
+    consentToPublish: true,
+    submissionKey: crypto.randomUUID(),
+  });
+  if (!value) throw new ClientError(error!, 400);
+  const published = input.published_content ? normalizeText(input.published_content) || null : null;
+  if (published && unicodeLength(published) > 700)
+    throw new ClientError('공개용 본문은 700자 이내입니다.', 400);
   if (
-    !UUID_PATTERN.test(id) ||
-    Object.keys(patch).some(
-      (key) => !['status', 'published_content', 'publish_order'].includes(key),
-    )
+    !['pending', 'approved', 'rejected'].includes(input.status) ||
+    (input.publish_order !== null &&
+      (!Number.isInteger(input.publish_order) ||
+        input.publish_order < 0 ||
+        input.publish_order > 1000000))
   )
-    throw new ClientError('원문과 접수 정보는 수정할 수 없습니다.', 400);
-  const content =
-    typeof patch.published_content === 'string'
-      ? normalizeText(patch.published_content) || null
-      : patch.published_content;
-  if (content != null && (typeof content !== 'string' || unicodeLength(content) > 700))
-    throw new ClientError('공개용 본문은 700자 이내로 작성해 주세요.', 400);
-  const updates = {
-    ...patch,
-    ...('published_content' in patch ? { published_content: content } : {}),
-    reviewed_at: serverTimestamp(),
+    throw new ClientError('검수 상태와 공개 순서를 확인해 주세요.', 400);
+  return {
+    nickname: value.nickname || null,
+    content: value.content,
+    published_content: published,
+    status: input.status,
+    publish_order: input.publish_order,
   };
-  await withDeadline(updateDoc(doc(db, 'letters', id), updates));
-  return decodeLetter(await withDeadline(getDoc(doc(db, 'letters', id))));
+}
+
+function publicLetter(id: string, data: LetterEdit) {
+  return {
+    id,
+    nickname: data.nickname || '오성고 선배',
+    content: data.published_content || data.content,
+    order: data.publish_order,
+    sort_order: data.publish_order ?? 1000001,
+  };
+}
+
+export async function saveLetter(db: Firestore, uid: string, id: string | null, input: LetterEdit) {
+  const data = letterEdit(input);
+  const key = id ?? crypto.randomUUID();
+  if (!UUID_PATTERN.test(key)) throw new ClientError('글 ID가 올바르지 않습니다.', 400);
+  await withDeadline(
+    runTransaction(db, async (tx) => {
+      const ref = doc(db, 'letters', key);
+      const previous = await tx.get(ref);
+      if (id && !previous.exists())
+        throw new ClientError('이미 삭제된 글입니다. 목록을 새로고침해 주세요.', 404);
+      tx.set(
+        ref,
+        previous.exists()
+          ? { ...previous.data(), ...data, reviewed_at: serverTimestamp() }
+          : {
+              ...data,
+              id: key,
+              owner_uid: uid,
+              submission_key: key,
+              consent_to_publish: 1,
+              created_at: serverTimestamp(),
+              reviewed_at: serverTimestamp(),
+            },
+      );
+      const publicRef = doc(db, 'publicLetters', key);
+      if (data.status === 'approved') tx.set(publicRef, publicLetter(key, data));
+      else tx.delete(publicRef);
+    }),
+  );
+  return decodeLetter(await withDeadline(getDoc(doc(db, 'letters', key))));
+}
+
+// 검수만 하는 호출도 공개 사본과 함께 갱신합니다.
+export async function reviewLetter(db: Firestore, id: string, patch: Record<string, unknown>) {
+  const snapshot = await withDeadline(getDoc(doc(db, 'letters', id)));
+  if (!snapshot.exists()) throw new ClientError('글을 찾을 수 없습니다.', 404);
+  return saveLetter(db, snapshot.data()!.owner_uid, id, {
+    ...decodeLetter(snapshot),
+    ...patch,
+  });
+}
+
+export async function deleteLetter(db: Firestore, id: string) {
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'letters', id));
+  batch.delete(doc(db, 'publicLetters', id));
+  // 접수증은 남겨 기기의 재전송이 삭제된 글을 다시 만들지 못하게 합니다.
+  await withDeadline(batch.commit());
+}
+
+export async function synchronizePublicLetters(db: Firestore) {
+  const letters = await readLetters(db);
+  let count = 0;
+  for (let offset = 0; offset < letters.length; offset += 8) {
+    const batch = writeBatch(db);
+    for (const letter of letters.slice(offset, offset + 8)) {
+      const ref = doc(db, 'publicLetters', letter.id);
+      if (letter.status === 'approved' && letter.consent_to_publish === 1) {
+        batch.set(ref, publicLetter(letter.id, letter));
+        count++;
+      } else batch.delete(ref);
+    }
+    await withDeadline(batch.commit());
+  }
+  return count;
+}
+
+export async function readPublicLetters(db: Firestore, cursor?: DocumentSnapshot) {
+  const page = await withDeadline(
+    getDocs(
+      query(
+        collection(db, 'publicLetters'),
+        orderBy('sort_order'),
+        orderBy('__name__'),
+        ...(cursor ? [startAfter(cursor)] : []),
+        limit(21),
+      ),
+    ),
+  );
+  return {
+    letters: page.docs.slice(0, 20).map((snapshot) => {
+      const data = snapshot.data();
+      return {
+        id: snapshot.id,
+        nickname: data.nickname,
+        content: data.content,
+        order: data.order,
+      } as PublicLetter;
+    }),
+    cursor: page.docs[19],
+    hasNext: page.docs.length > 20,
+  };
 }
 
 export async function reviewTyping(
   db: Firestore,
   id: string,
-  patch: { prizeReceived?: boolean; verificationStatus?: 'pending' | 'verified' | 'rejected' },
+  patch: {
+    prizeReceived?: boolean;
+    verificationStatus?: 'pending' | 'verified' | 'rejected';
+  },
 ) {
   if (!UUID_PATTERN.test(id)) throw new ClientError('기록 ID가 올바르지 않습니다.', 400);
   await withDeadline(
-    updateDoc(doc(db, 'typingResults', id), { ...patch, reviewed_at: serverTimestamp() }),
+    updateDoc(doc(db, 'typingResults', id), {
+      ...patch,
+      reviewed_at: serverTimestamp(),
+    }),
   );
 }
 
@@ -260,20 +388,165 @@ export async function readEvent(db: Firestore): Promise<EventConfig> {
     );
   return {
     phase,
-    typingEnabled: phase === 'A',
-    submissionsEnabled: phase === 'A',
+    typingEnabled: phase === 'A' && snapshot.data()?.typingEnabled !== false,
+    submissionsEnabled: phase === 'A' && snapshot.data()?.submissionsEnabled !== false,
+    welcomeEnabled: snapshot.data()?.welcomeEnabled ?? phase === 'C',
+    activeChallengeId: snapshot.data()?.activeChallengeId || CHALLENGE.challengeId,
     backend: 'firebase',
   };
 }
 
-export async function setEvent(db: Firestore, phase: EventConfig['phase']) {
-  const batch = writeBatch(db);
-  batch.set(doc(db, 'challenges', CHALLENGE.challengeId), {
-    text: CHALLENGE.text,
-    referenceKeystrokes: CHALLENGE.referenceKeystrokes,
-    practice: CHALLENGE.practice,
-    enabled: true,
+export async function setEvent(
+  db: Firestore,
+  phase: EventConfig['phase'],
+  options?: Omit<EventConfig, 'phase' | 'backend'>,
+) {
+  await withDeadline(
+    runTransaction(db, async (tx) => {
+      const ref = doc(db, 'challenges', options?.activeChallengeId || CHALLENGE.challengeId);
+      const challenge = await tx.get(ref);
+      if (!challenge.exists()) {
+        if (options?.activeChallengeId && options.activeChallengeId !== CHALLENGE.challengeId)
+          throw new ClientError('사용할 대회 문구를 먼저 등록해 주세요.', 400);
+        tx.set(ref, {
+          text: CHALLENGE.text,
+          referenceKeystrokes: CHALLENGE.referenceKeystrokes,
+          practice: true,
+          enabled: true,
+        });
+      } else if (challenge.data().enabled !== true || challenge.data().deleted === true) {
+        throw new ClientError('사용할 문구의 접수를 먼저 켜 주세요.', 400);
+      }
+      tx.set(doc(db, 'settings', 'event'), {
+        phase,
+        ...(options ?? {}),
+        updated_at: serverTimestamp(),
+      });
+    }),
+  );
+}
+
+export async function readChallenge(db: Firestore, id: string): Promise<TypingChallenge> {
+  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id))
+    throw new ClientError('문구 ID가 올바르지 않습니다.', 400);
+  const snapshot = await withDeadline(getDoc(doc(db, 'challenges', id)));
+  if (!snapshot.exists())
+    throw new ClientError('대회 문구를 찾을 수 없습니다. 문구 설정을 확인해 주세요.', 400);
+  const data = snapshot.data();
+  return {
+    challengeId: id,
+    title: data.title || (id === CHALLENGE.challengeId ? CHALLENGE.title : id),
+    text: data.text,
+    referenceKeystrokes: data.referenceKeystrokes,
+    practice: data.practice,
+    enabled: data.enabled,
+    deleted: data.deleted === true,
+  };
+}
+
+export async function readChallenges(db: Firestore) {
+  return (await allDocuments(db, 'challenges')).map((snapshot) => {
+    const data = snapshot.data()!;
+    return {
+      challengeId: snapshot.id,
+      title: data.title || (snapshot.id === CHALLENGE.challengeId ? CHALLENGE.title : snapshot.id),
+      text: data.text,
+      referenceKeystrokes: data.referenceKeystrokes,
+      practice: data.practice,
+      enabled: data.enabled,
+      deleted: data.deleted === true,
+    } as TypingChallenge;
   });
-  batch.set(doc(db, 'settings', 'event'), { phase, updated_at: serverTimestamp() });
-  await withDeadline(batch.commit());
+}
+
+export async function saveChallenge(
+  db: Firestore,
+  input: Pick<TypingChallenge, 'title' | 'text' | 'practice'>,
+  previous?: TypingChallenge,
+) {
+  const title = normalizeText(input.title);
+  const text = normalizeText(input.text).replace(/\s+/g, ' ');
+  if (!title || unicodeLength(title) > 80 || !text || unicodeLength(text) > 1000)
+    throw new ClientError('제목은 1~80자, 문구는 1~1,000자로 입력해 주세요.', 400);
+  // 채점에 영향을 주는 변경은 새 버전으로 저장해 기존 참가 기록을 보존합니다.
+  const id =
+    previous && previous.text === text && previous.practice === input.practice
+      ? previous.challengeId
+      : crypto.randomUUID();
+  await withDeadline(
+    setDoc(doc(db, 'challenges', id), {
+      title,
+      text,
+      practice: input.practice,
+      referenceKeystrokes: countKeystrokes(text),
+      enabled: previous?.enabled ?? true,
+      deleted: false,
+    }),
+  );
+  return id;
+}
+
+export async function changeChallenge(
+  db: Firestore,
+  id: string,
+  patch: { enabled?: boolean; deleted?: boolean },
+) {
+  await withDeadline(updateDoc(doc(db, 'challenges', id), patch));
+}
+
+export async function saveTyping(
+  db: Firestore,
+  uid: string,
+  id: string | null,
+  input: Pick<
+    TypingResult,
+    | 'participantId'
+    | 'displayName'
+    | 'challengeId'
+    | 'elapsedMs'
+    | 'errors'
+    | 'verificationStatus'
+    | 'prizeReceived'
+  >,
+) {
+  const challenge = await readChallenge(db, input.challengeId);
+  const computed = calculateScore(challenge.referenceKeystrokes, input.elapsedMs, input.errors);
+  const data = {
+    ...input,
+    ...computed,
+    participantId: normalizeText(input.participantId),
+    displayName: normalizeText(input.displayName),
+    practice: challenge.practice,
+    verificationStatus: input.verificationStatus ?? 'pending',
+  };
+  if (
+    !data.participantId ||
+    !data.displayName ||
+    unicodeLength(data.participantId) > 30 ||
+    unicodeLength(data.displayName) > 30 ||
+    input.elapsedMs > 3600000 ||
+    input.errors > 10000 ||
+    (input.prizeReceived && (challenge.practice || data.verificationStatus !== 'verified'))
+  )
+    throw new ClientError('참가 정보·시간·오타와 상품 수령 조건을 확인해 주세요.', 400);
+  const key = id ?? crypto.randomUUID();
+  if (!UUID_PATTERN.test(key)) throw new ClientError('기록 ID가 올바르지 않습니다.', 400);
+  const ref = doc(db, 'typingResults', key);
+  if (id) await withDeadline(updateDoc(ref, { ...data, reviewed_at: serverTimestamp() }));
+  else
+    await withDeadline(
+      setDoc(ref, {
+        ...data,
+        id: key,
+        owner_uid: uid,
+        completedAt: new Date().toISOString(),
+        received_at: serverTimestamp(),
+        reviewed_at: serverTimestamp(),
+      }),
+    );
+  return key;
+}
+
+export async function deleteTyping(db: Firestore, id: string) {
+  await withDeadline(deleteDoc(doc(db, 'typingResults', id)));
 }

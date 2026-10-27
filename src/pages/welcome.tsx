@@ -1,35 +1,51 @@
 import { useEffect, useState } from 'react';
 import type { PublicData } from '../lib/types';
-import { validatePublicData } from '../lib/public-data';
+import type { DocumentSnapshot } from 'firebase/firestore';
+import { getClients } from '../lib/firebase';
+import { readPublicLetters } from '../lib/database';
+import { EventNotice, useEvent } from '../components/EventProvider';
 
 export default function WelcomePage() {
+  const { config } = useEvent();
   const [data, setData] = useState<PublicData | null>(null);
   const [error, setError] = useState('');
   const [retry, setRetry] = useState(0);
   const [page, setPage] = useState(1);
+  const [cursors, setCursors] = useState<(DocumentSnapshot | undefined)[]>([undefined]);
+  const [nextCursor, setNextCursor] = useState<DocumentSnapshot>();
+  const [hasNext, setHasNext] = useState(false);
+  const cursor = cursors[page - 1];
   const pageSize = 20;
   useEffect(() => {
-    const abort = new AbortController();
+    let cancelled = false;
+    if (!config) return;
+    if (!config.welcomeEnabled) {
+      setData({ schemaVersion: 1, publishedAt: null, letters: [] });
+      setError('');
+      return;
+    }
     async function load() {
       setError('');
+      setData(null);
       try {
-        const response = await fetch(`${import.meta.env.BASE_URL}data/welcome.json`, {
-          signal: abort.signal,
-          cache: 'no-cache',
+        const payload = await readPublicLetters((await getClients()).deviceDb, cursor);
+        if (cancelled) return;
+        setData({
+          schemaVersion: 1,
+          publishedAt: null,
+          letters: payload.letters,
         });
-        if (!response.ok) throw new Error();
-        const payload: unknown = await response.json();
-        if (!validatePublicData(payload)) throw new Error();
-        setData(payload);
-        setPage(1);
+        setNextCursor(payload.cursor);
+        setHasNext(payload.hasNext);
       } catch {
-        if (!abort.signal.aborted)
-          setError('이야기를 불러오지 못했습니다. 잠시 후 다시 열어 주세요.');
+        if (!cancelled) setError('이야기를 불러오지 못했습니다. 잠시 후 다시 열어 주세요.');
       }
     }
     void load();
-    return () => abort.abort();
-  }, [retry]);
+    return () => {
+      cancelled = true;
+    };
+  }, [retry, config?.welcomeEnabled, cursor, page]);
   return (
     <>
       <div className="page-heading">
@@ -37,6 +53,7 @@ export default function WelcomePage() {
         <h1>새로운 시작을 환영해요.</h1>
         <p>조금 먼저 이곳을 걸어온 선배들이 여러분에게 보내는 이야기입니다.</p>
       </div>
+      {!config && <EventNotice />}
       {error ? (
         <div className="notice" role="alert">
           {error} <button onClick={() => setRetry((r) => r + 1)}>다시 불러오기</button>
@@ -51,11 +68,10 @@ export default function WelcomePage() {
       ) : (
         <>
           <p className="muted" role="status">
-            선배의 이야기 {data.letters.length}편 · {page} /{' '}
-            {Math.ceil(data.letters.length / pageSize)} 페이지
+            선배의 이야기 · {page} 페이지
           </p>
           <div className="letter-list">
-            {data.letters.slice((page - 1) * pageSize, page * pageSize).map((letter, index) => (
+            {data.letters.map((letter, index) => (
               <article key={letter.id} className="panel welcome-letter">
                 <p className="eyebrow">
                   선배의 이야기 {String((page - 1) * pageSize + index + 1).padStart(2, '0')}
@@ -65,7 +81,7 @@ export default function WelcomePage() {
               </article>
             ))}
           </div>
-          {data.letters.length > pageSize && (
+          {(page > 1 || hasNext) && (
             <nav className="pagination" aria-label="선배 이야기 페이지">
               <button
                 disabled={page === 1}
@@ -76,12 +92,11 @@ export default function WelcomePage() {
               >
                 이전 이야기
               </button>
-              <span>
-                {page} / {Math.ceil(data.letters.length / pageSize)}
-              </span>
+              <span>{page} 페이지</span>
               <button
-                disabled={page * pageSize >= data.letters.length}
+                disabled={!hasNext}
                 onClick={() => {
+                  setCursors((previous) => [...previous.slice(0, page), nextCursor]);
                   setPage((p) => p + 1);
                   window.scrollTo(0, 0);
                 }}

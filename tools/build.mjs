@@ -1,12 +1,19 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { validatePublicData } from '../src/lib/public-data.ts';
-const published = JSON.parse(await readFile('public/data/welcome.json', 'utf8'));
-if (!validatePublicData(published))
-  throw new Error('공개 JSON 형식이 올바르지 않습니다. 전체 백업을 공개 파일에 넣지 마세요.');
 if (process.env.PAGES_BASE_PATH && process.env.VITE_FIREBASE_EMULATORS === 'true')
   throw new Error('GitHub Pages builds must set VITE_FIREBASE_EMULATORS=false.');
 const html = await readFile('dist/index.html', 'utf8');
-for (const route of ['typing', 'typing/results', 'write', 'write/complete', 'welcome', 'admin']) {
+const routes = [
+  'typing',
+  'typing/results',
+  'write',
+  'write/complete',
+  'welcome',
+  'admin',
+  'admin/typing',
+  'admin/settings',
+  'admin/account',
+];
+for (const route of routes) {
   await mkdir(`dist/${route}`, { recursive: true });
   await writeFile(`dist/${route}/index.html`, html);
 }
@@ -29,4 +36,4 @@ if (process.env.FIREBASE_CONFIG) {
     throw new Error('Only Firebase public web app config is allowed. Never use a service account.');
   await writeFile('dist/firebase-config.json', JSON.stringify(config, null, 2));
 }
-console.log('GitHub Pages: 6 direct route entries generated.');
+console.log(`GitHub Pages: ${routes.length} direct route entries generated.`);

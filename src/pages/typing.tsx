@@ -11,9 +11,10 @@ import {
 } from '../typing/engine';
 import { calculateScore } from '../typing/scoring';
 import { saveResult } from '../typing/storage';
-import type { TypingResult } from '../lib/types';
+import type { TypingResult, TypingChallenge } from '../lib/types';
 import { EventNotice, useEvent } from '../components/EventProvider';
-import { errorMessage } from '../lib/firebase';
+import { errorMessage, getClients } from '../lib/firebase';
+import { readChallenge } from '../lib/database';
 import { downloadFile } from '../lib/files';
 import { useLeaveGuard } from '../lib/useLeaveGuard';
 
@@ -21,6 +22,31 @@ type Status = 'ready' | 'armed' | 'running' | 'saving' | 'saved' | 'failed' | 'i
 
 export default function TypingPage() {
   const { config, refresh } = useEvent();
+  const [challenge, setChallenge] = useState<TypingChallenge>({
+    ...CHALLENGE,
+    enabled: false,
+    deleted: false,
+  });
+  const [attempt, setAttempt] = useState<TypingChallenge | null>(null);
+  const currentChallenge = attempt ?? challenge;
+  useEffect(() => {
+    if (!config) return;
+    let cancelled = false;
+    void getClients()
+      .then((clients) => readChallenge(clients.deviceDb, config.activeChallengeId))
+      .then((value) => {
+        if (!cancelled) setChallenge(value);
+      })
+      .catch((reason) => {
+        if (!cancelled) {
+          setChallenge((previous) => ({ ...previous, enabled: false }));
+          setMessage(errorMessage(reason));
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [config?.activeChallengeId]);
   const [participantId, setParticipantId] = useState('');
   const [displayName, setDisplayName] = useState('');
   const [status, setStatus] = useState<Status>('ready');
@@ -86,6 +112,13 @@ export default function TypingPage() {
         setMessage('현재 타자 대회에 참가할 수 없습니다.');
         return;
       }
+      const next = await readChallenge((await getClients()).deviceDb, current.activeChallengeId);
+      if (!next.enabled || next.deleted) {
+        setMessage('현재 문구의 접수가 중지되었습니다.');
+        return;
+      }
+      setChallenge(next);
+      setAttempt(next);
       engine.current = initialInputState();
       startedAt.current = null;
       setInput('');
@@ -95,6 +128,8 @@ export default function TypingPage() {
       setResult(null);
       transition('armed');
       requestAnimationFrame(() => inputRef.current?.focus());
+    } catch (reason) {
+      setMessage(errorMessage(reason));
     } finally {
       startingRef.current = false;
       setStarting(false);
@@ -131,13 +166,13 @@ export default function TypingPage() {
     if (value.length) beginTiming();
     setInput(value);
     engine.current = endedComposition
-      ? compositionEnd(engine.current, value, CHALLENGE.text)
-      : commitInput(engine.current, value, CHALLENGE.text);
+      ? compositionEnd(engine.current, value, currentChallenge.text)
+      : commitInput(engine.current, value, currentChallenge.text);
     setErrors(engine.current.errors);
-    if (isComplete(engine.current, CHALLENGE.text) && startedAt.current !== null) {
+    if (isComplete(engine.current, currentChallenge.text) && startedAt.current !== null) {
       const elapsedMs = Math.max(1, performance.now() - startedAt.current);
       const computed = calculateScore(
-        CHALLENGE.referenceKeystrokes,
+        currentChallenge.referenceKeystrokes,
         elapsedMs,
         engine.current.errors,
       );
@@ -145,13 +180,13 @@ export default function TypingPage() {
         id: crypto.randomUUID(),
         participantId: participantId.trim(),
         displayName: displayName.trim(),
-        challengeId: CHALLENGE.challengeId,
+        challengeId: currentChallenge.challengeId,
         elapsedMs,
         ...computed,
         errors: engine.current.errors,
         completedAt: new Date().toISOString(),
         prizeReceived: false,
-        practice: CHALLENGE.practice,
+        practice: currentChallenge.practice,
       };
       setElapsed(elapsedMs);
       setResult(completed);
@@ -161,6 +196,7 @@ export default function TypingPage() {
   }
 
   function reset() {
+    setAttempt(null);
     transition('ready');
     setInput('');
     setErrors(0);
@@ -184,14 +220,17 @@ export default function TypingPage() {
       </div>
       <EventNotice />
       <p className="notice">
-        현재 문구는 임시 애국가 연습용입니다. 모든 결과는 연습 기록으로 저장됩니다.
+        {currentChallenge.practice
+          ? '현재 문구는 연습용입니다. 결과는 연습 기록으로 저장됩니다.'
+          : '현재 문구는 공식 대회용입니다. 결과는 운영진 확인 후 공식 기록으로 확정됩니다.'}
       </p>
       <details>
         <summary>입력·채점 규칙 확인</summary>
         <ul>
           <li>첫 글자 입력부터 시간 측정. 문구를 정확히 완성하면 자동 종료합니다.</li>
           <li>
-            기준 {CHALLENGE.referenceKeystrokes}타 × 60 ÷ 소요 초, 반올림하여 타수를 계산합니다.
+            기준 {currentChallenge.referenceKeystrokes}타 × 60 ÷ 소요 초, 반올림하여 타수를
+            계산합니다.
           </li>
           <li>
             두벌식 글쇠 기준이며 Shift는 별도 타수로 세지 않습니다. 공백·문장부호는 각각 1타입니다.
@@ -229,8 +268,17 @@ export default function TypingPage() {
             />
           </label>
           {status === 'ready' && (
-            <button className="primary" disabled={starting || !config?.typingEnabled}>
-              {starting ? '운영 상태 확인 중…' : '연습 타자 시작'}
+            <button
+              className="primary"
+              disabled={
+                starting || !config?.typingEnabled || !challenge.enabled || challenge.deleted
+              }
+            >
+              {starting
+                ? '운영 상태 확인 중…'
+                : currentChallenge.practice
+                  ? '연습 타자 시작'
+                  : '대회 타자 시작'}
             </button>
           )}
         </form>
@@ -241,9 +289,15 @@ export default function TypingPage() {
       </section>
       <section className="panel">
         <div className="section-top">
-          <h2>{CHALLENGE.title}</h2>
+          <h2>{currentChallenge.title}</h2>
           <span className="badge">
-            {status === 'running' ? '측정 중' : status === 'armed' ? '첫 입력 대기' : '연습'}
+            {status === 'running'
+              ? '측정 중'
+              : status === 'armed'
+                ? '첫 입력 대기'
+                : currentChallenge.practice
+                  ? '연습'
+                  : '공식'}
           </span>
         </div>
         <div className="metrics" aria-live="off">
@@ -260,8 +314,8 @@ export default function TypingPage() {
             <span>최종 점수</span>
           </div>
         </div>
-        <p className="challenge" aria-label={`입력할 문구: ${CHALLENGE.text}`}>
-          {Array.from(CHALLENGE.text).map((char, i) => (
+        <p className="challenge" aria-label={`입력할 문구: ${currentChallenge.text}`}>
+          {Array.from(currentChallenge.text).map((char, i) => (
             <span
               key={i}
               className={`${i < inputChars.length ? (inputChars[i] === char ? 'correct' : 'incorrect') : ''} ${i === inputChars.length ? 'cursor' : ''}`}
@@ -311,7 +365,7 @@ export default function TypingPage() {
         <p id="typing-feedback" role="status">
           {message ||
             (active
-              ? `입력 ${inputChars.length} / ${Array.from(CHALLENGE.text).length}자 · 누적 오타 ${errors}회. 틀린 글자는 밑줄로 표시합니다.`
+              ? `입력 ${inputChars.length} / ${Array.from(currentChallenge.text).length}자 · 누적 오타 ${errors}회. 틀린 글자는 밑줄로 표시합니다.`
               : '한글 두벌식 키보드가 연결된 PC에서 참여해 주세요.')}
         </p>
         {result && (

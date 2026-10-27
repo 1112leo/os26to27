@@ -1,22 +1,199 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from 'react';
 import { Link } from 'react-router-dom';
-import type { TypingResult } from '../lib/types';
+import type { TypingResult, TypingChallenge } from '../lib/types';
 import {
   pendingResults,
   resultsCsv,
   synchronizePending,
   listLocalResults,
 } from '../typing/storage';
-import { rankResults } from '../typing/scoring';
+import { calculateScore, rankResults } from '../typing/scoring';
 import { adminContext, errorMessage } from '../lib/firebase';
 import { downloadFile, koreanDate } from '../lib/files';
 import { useAdmin } from '../components/SessionProvider';
-import { readTyping, reviewTyping } from '../lib/database';
+import {
+  deleteTyping,
+  readChallenges,
+  readTyping,
+  reviewTyping,
+  saveTyping,
+} from '../lib/database';
 
-const verificationLabels = { pending: '확인 대기', verified: '운영진 확인', rejected: '제외' };
+const verificationLabels = {
+  pending: '확인 대기',
+  verified: '운영진 확인',
+  rejected: '제외',
+};
+
+function ResultEditor({
+  result,
+  challenges,
+  onSaved,
+  onClose,
+}: {
+  result: TypingResult | null;
+  challenges: TypingChallenge[];
+  onSaved: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const [participantId, setParticipantId] = useState(result?.participantId ?? '');
+  const [displayName, setDisplayName] = useState(result?.displayName ?? '');
+  const [challengeId, setChallengeId] = useState(
+    result?.challengeId ?? challenges.find((c) => c.enabled && !c.deleted)?.challengeId ?? '',
+  );
+  const [seconds, setSeconds] = useState(result ? String(result.elapsedMs / 1000) : '');
+  const [errors, setErrors] = useState(result?.errors ?? 0);
+  const [verificationStatus, setVerification] = useState(result?.verificationStatus ?? 'pending');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState('');
+  const challenge = challenges.find((c) => c.challengeId === challengeId);
+  const elapsedMs = Number(seconds) * 1000;
+  const computed =
+    challenge && elapsedMs > 0 && Number.isInteger(errors) && errors >= 0
+      ? calculateScore(challenge.referenceKeystrokes, elapsedMs, errors)
+      : null;
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (busy || !computed) return;
+    setBusy(true);
+    setError('');
+    try {
+      const { db, uid } = await adminContext();
+      await saveTyping(db, uid, result?.id ?? null, {
+        participantId,
+        displayName,
+        challengeId,
+        elapsedMs,
+        errors,
+        verificationStatus,
+        prizeReceived:
+          !!result?.prizeReceived && !challenge?.practice && verificationStatus === 'verified',
+      });
+      await onSaved();
+      onClose();
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <section className="panel review-panel" aria-label="타자 기록 편집">
+      <div className="section-top">
+        <h2>{result ? '타자 기록 수정' : '타자 기록 추가'}</h2>
+        <button disabled={busy} onClick={onClose}>
+          닫기
+        </button>
+      </div>
+      <form onSubmit={(event) => void submit(event)}>
+        <div className="form-grid">
+          <label>
+            참가번호
+            <input
+              required
+              maxLength={30}
+              value={participantId}
+              disabled={busy}
+              onChange={(e) => setParticipantId(e.target.value)}
+            />
+          </label>
+          <label>
+            표시 이름
+            <input
+              required
+              maxLength={30}
+              value={displayName}
+              disabled={busy}
+              onChange={(e) => setDisplayName(e.target.value)}
+            />
+          </label>
+        </div>
+        <label>
+          문구 버전
+          <select
+            required
+            value={challengeId}
+            disabled={busy}
+            onChange={(e) => setChallengeId(e.target.value)}
+          >
+            <option value="">선택</option>
+            {challenges.map((c) => (
+              <option key={c.challengeId} value={c.challengeId}>
+                {c.title} · {c.practice ? '연습' : '공식'}
+                {c.deleted ? ' · 삭제 보관' : ''}
+              </option>
+            ))}
+          </select>
+        </label>
+        <div className="form-grid">
+          <label>
+            소요 시간 (초)
+            <input
+              required
+              type="number"
+              min="0.001"
+              max="3600"
+              step="any"
+              value={seconds}
+              disabled={busy}
+              onChange={(e) => setSeconds(e.target.value)}
+            />
+          </label>
+          <label>
+            누적 오타
+            <input
+              required
+              type="number"
+              min="0"
+              max="10000"
+              step="1"
+              value={errors}
+              disabled={busy}
+              onChange={(e) => setErrors(Number(e.target.value))}
+            />
+          </label>
+        </div>
+        <p className="notice">
+          자동 계산:{' '}
+          {computed ? `${computed.speed}타 · ${computed.score}점` : '시간과 문구를 입력하세요.'} ·
+          최저 0점
+        </p>
+        <label>
+          운영진 확인
+          <select
+            value={verificationStatus}
+            disabled={busy}
+            onChange={(e) => setVerification(e.target.value as typeof verificationStatus)}
+          >
+            {Object.entries(verificationLabels).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+        </label>
+        <p className="muted">
+          수기 추가·정정도 문구와 시간·오타로 점수를 계산합니다. 연습 또는 미확인으로 바꾸면 상품
+          수령 표시는 해제됩니다.
+        </p>
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+        <button className="primary" disabled={busy || !computed}>
+          {busy ? '저장 중…' : '기록 저장'}
+        </button>
+      </form>
+    </section>
+  );
+}
+
 export default function ResultsPage() {
   const auth = useAdmin();
   const [results, setResults] = useState<TypingResult[]>([]);
+  const [challenges, setChallenges] = useState<TypingChallenge[]>([]);
+  const [editing, setEditing] = useState<TypingResult | null | undefined>();
   const [query, setQuery] = useState('');
   const [version, setVersion] = useState('');
   const [verification, setVerification] = useState('all');
@@ -31,7 +208,9 @@ export default function ResultsPage() {
     setLoading(true);
     setError('');
     try {
-      const records = await readTyping((await adminContext()).db);
+      const { db } = await adminContext();
+      const [records, phrases] = await Promise.all([readTyping(db), readChallenges(db)]);
+      setChallenges(phrases);
       setResults(records);
       setVersion((current) => current || records[0]?.challengeId || '');
       try {
@@ -68,9 +247,33 @@ export default function ResultsPage() {
   );
   const shown = matched.slice((page - 1) * 50, page * 50);
 
+  async function remove(result: TypingResult) {
+    if (
+      !window.confirm(
+        `${result.displayName} 참가자의 기록을 삭제할까요? 서버 순위에서도 제거되며 되돌릴 수 없습니다.`,
+      )
+    )
+      return;
+    setUpdating(result.id);
+    setError('');
+    try {
+      await deleteTyping((await adminContext()).db, result.id);
+      setResults((all) => all.filter((item) => item.id !== result.id));
+      setPage(1);
+      setMessage('타자 기록을 삭제했습니다.');
+    } catch (reason) {
+      setError(errorMessage(reason));
+    } finally {
+      setUpdating(null);
+    }
+  }
+
   async function update(
     result: TypingResult,
-    patch: { prizeReceived?: boolean; verificationStatus?: 'pending' | 'verified' | 'rejected' },
+    patch: {
+      prizeReceived?: boolean;
+      verificationStatus?: 'pending' | 'verified' | 'rejected';
+    },
   ) {
     setUpdating(result.id);
     setError('');
@@ -152,6 +355,27 @@ export default function ResultsPage() {
         <p role="status" className="notice">
           {message}
         </p>
+      )}
+      <div className="actions">
+        <button
+          className="primary"
+          disabled={!!updating || editing !== undefined || !challenges.length}
+          onClick={() => setEditing(null)}
+        >
+          타자 기록 추가
+        </button>
+      </div>
+      {editing !== undefined && (
+        <ResultEditor
+          key={editing?.id ?? 'new'}
+          result={editing}
+          challenges={challenges}
+          onSaved={async () => {
+            await load();
+            setMessage('타자 기록을 저장했습니다.');
+          }}
+          onClose={() => setEditing(undefined)}
+        />
       )}
       <section className="panel">
         <h2>이 기기의 전송 대기·백업</h2>
@@ -235,7 +459,11 @@ export default function ResultsPage() {
               downloadFile(
                 'ohsung-typing-backup.json',
                 JSON.stringify(
-                  { schemaVersion: 1, exportedAt: new Date().toISOString(), results },
+                  {
+                    schemaVersion: 1,
+                    exportedAt: new Date().toISOString(),
+                    results,
+                  },
                   null,
                   2,
                 ),
@@ -266,6 +494,7 @@ export default function ResultsPage() {
                   <th>서버 접수</th>
                   <th>확인</th>
                   <th>상품</th>
+                  <th>편집</th>
                 </tr>
               </thead>
               <tbody>
@@ -322,7 +551,9 @@ export default function ResultsPage() {
                           !!updating || result.practice || result.verificationStatus !== 'verified'
                         }
                         onClick={() =>
-                          void update(result, { prizeReceived: !result.prizeReceived })
+                          void update(result, {
+                            prizeReceived: !result.prizeReceived,
+                          })
                         }
                       >
                         {result.practice
@@ -331,6 +562,26 @@ export default function ResultsPage() {
                             ? '수령 완료'
                             : '미수령'}
                       </button>
+                    </td>
+                    <td>
+                      <div className="actions">
+                        <button
+                          disabled={!!updating || editing !== undefined}
+                          onClick={() => {
+                            setEditing(result);
+                            window.scrollTo({ top: 0, behavior: 'smooth' });
+                          }}
+                        >
+                          수정
+                        </button>
+                        <button
+                          className="danger"
+                          disabled={!!updating || editing !== undefined}
+                          onClick={() => void remove(result)}
+                        >
+                          삭제
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}

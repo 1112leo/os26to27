@@ -526,3 +526,50 @@ td button {
   white-space: nowrap;
   border: 0;
 }
+.admin-nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-bottom: 24px;
+}
+.admin-nav a {
+  border: 1px solid #cad8ce;
+  border-radius: 8px;
+  padding: 10px 16px;
+  text-decoration: none;
+}
+.admin-nav a.active {
+  background: #e5f0e8;
+  border-color: #326445;
+  color: #234e32;
+  font-weight: 700;
+}
+button.danger {
+  color: #a42222;
+  border-color: #e1b6b6;
+}
+.break-anywhere {
+  overflow-wrap: anywhere;
+}
+.review-list small {
+  display: block;
+}
+dd {
+  margin: 4px 0 16px;
+}
+hr {
+  border: 0;
+  border-top: 1px solid #dce5dd;
+  margin: 28px 0;
+}
+details.panel > summary {
+  font-weight: 700;
+  cursor: pointer;
+}
+details.panel[open] > summary {
+  margin-bottom: 20px;
+}
+#challenge-editor,
+.review-panel {
+  scroll-margin-top: 24px;
+}

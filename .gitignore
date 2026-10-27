@@ -17,9 +17,6 @@
 !/public/
 /public/*
 !/public/firebase-config.example.json
-!/public/data/
-/public/data/*
-!/public/data/welcome.json
 
 # 데이터 보호 규칙
 !/firebase/

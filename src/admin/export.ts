@@ -6,7 +6,11 @@ import { toCsv } from '../lib/files';
 
 export function encodeFirestore(value: unknown): unknown {
   if (value instanceof Timestamp)
-    return { __firestoreTimestamp: true, seconds: value.seconds, nanoseconds: value.nanoseconds };
+    return {
+      __firestoreTimestamp: true,
+      seconds: value.seconds,
+      nanoseconds: value.nanoseconds,
+    };
   if (Array.isArray(value)) return value.map(encodeFirestore);
   if (value && typeof value === 'object')
     return Object.fromEntries(
@@ -17,7 +21,13 @@ export function encodeFirestore(value: unknown): unknown {
 
 export async function createPrivateBackup(db: Firestore) {
   const collections: Record<string, unknown> = {};
-  for (const name of ['letters', 'typingResults', 'receipts', 'challenges']) {
+  for (const name of [
+    'letters',
+    'typingResults',
+    'receipts',
+    'challenges',
+    'publicLetters',
+  ]) {
     collections[name] = (await allDocuments(db, name)).map((snapshot) => ({
       id: snapshot.id,
       data: encodeFirestore(snapshot.data()),

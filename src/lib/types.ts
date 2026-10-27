@@ -5,7 +5,19 @@ export interface EventConfig {
   phase: EventPhase;
   typingEnabled: boolean;
   submissionsEnabled: boolean;
+  welcomeEnabled: boolean;
+  activeChallengeId: string;
   backend?: 'firebase';
+}
+
+export interface TypingChallenge {
+  challengeId: string;
+  title: string;
+  text: string;
+  referenceKeystrokes: number;
+  practice: boolean;
+  enabled: boolean;
+  deleted: boolean;
 }
 
 export interface LetterSubmission {

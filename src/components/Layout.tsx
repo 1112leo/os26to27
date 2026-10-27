@@ -49,7 +49,9 @@ function AdminBar() {
   if (!session.authenticated) return null;
   return (
     <div className="admin-bar container">
-      <span>관리자 모드 · {session.email}</span>
+      <span>
+        관리자 모드 · {session.email} · <Link to="/admin/account">계정 설정</Link>
+      </span>
       <button onClick={() => void logout()}>로그아웃</button>
     </div>
   );
@@ -80,7 +82,9 @@ export function HomePage() {
             같은 문구를 얼마나 빠르고 정확하게 칠 수 있을까요? 오타 하나에 20점 감점, 최저 점수는
             0점입니다.
           </p>
-          <p className="muted">현재 임시 애국가 연습 문구를 운영합니다.</p>
+          <p className="muted">
+            운영진이 설정한 문구로 참가하며, 기록은 운영진 확인 후 확정됩니다.
+          </p>
           <Link className="button primary" to="/typing">
             {config?.typingEnabled ? '타자 대회 참여하기' : '타자 대회 안내 보기'} →
           </Link>
