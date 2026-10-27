@@ -186,7 +186,8 @@ function showLogin(error = '') {
     <p id="status" role="status" hidden></p><form class="panel" id="login">
       ${field('email', '이메일', '', 'email', 'required autocomplete="username"')}
       ${field('password', '비밀번호', '', 'password', 'required autocomplete="current-password"')}
-      <div class="actions"><button type="submit">로그인</button><button type="button" id="reset-password">비밀번호 재설정</button></div></form>`;
+      <div class="actions"><button type="submit">로그인</button><button type="button" id="reset-password">비밀번호 재설정</button></div></form>
+      <p><a href="${html(localHref('../../write/admin/action.html'))}">메일 링크로 비밀번호 설정</a></p>`;
   if (error) setStatus(error, true);
   submit($('#login'), async (values) => {
     applySession(await loginAdmin(values.email, values.password));
@@ -196,7 +197,9 @@ function showLogin(error = '') {
       const email = $('#login [name=email]').value;
       if (!email) throw new Error('이메일을 입력하세요.');
       await resetAdminPassword(email);
-      setStatus('등록된 이메일이면 재설정 메일이 전송됩니다.');
+      setStatus(
+        '등록된 이메일이면 재설정 메일이 전송됩니다. 메일 링크가 열리지 않으면 아래 ‘메일 링크로 비밀번호 설정’에서 링크 주소를 입력하세요.',
+      );
     });
 }
 function showAdmin() {

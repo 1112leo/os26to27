@@ -6,7 +6,7 @@ import {
 } from '../../firebase.js';
 
 const params = new URLSearchParams(location.search);
-const mode = params.get('mode');
+let mode = params.get('mode');
 let code = params.get('oobCode');
 const status = document.querySelector('#status');
 const section = document.querySelector('#action');
@@ -82,30 +82,59 @@ form.addEventListener('submit', (event) => {
 });
 confirmation.addEventListener('click', () => void complete(() => finishEmailAction(mode, code)));
 
-try {
-  if (
-    !Object.hasOwn(titles, mode) ||
-    params.getAll('mode').length !== 1 ||
-    !code ||
-    code.length > 4096 ||
-    params.getAll('oobCode').length !== 1
-  )
-    throw new Error('유효한 이메일 링크가 없습니다. 메일의 링크에서 다시 여세요.');
-  document.querySelector('#title').textContent = titles[mode];
-  document.title = titles[mode];
-  // 메일 URL의 apiKey는 사용하지 않고, 이 사이트의 Firebase 설정으로 검증합니다.
-  const action = await inspectEmailAction(mode, code);
-  document.querySelector('#email').textContent = action.email ?? '';
-  section.hidden = false;
-  message('');
-  if (mode === 'resetPassword') {
-    form.hidden = false;
-    form.elements.password.focus();
-  } else {
-    confirmation.hidden = false;
-    confirmation.textContent = `${titles[mode]} 확인`;
+const importForm = document.querySelector('#import-link');
+importForm.addEventListener('submit', (event) => {
+  event.preventDefault();
+  try {
+    const link = new URL(new FormData(importForm).get('link'));
+    if (
+      link.protocol !== 'https:' ||
+      link.hostname !== 'os20th.firebaseapp.com' ||
+      link.pathname !== '/__/auth/action'
+    )
+      throw new Error('이 프로젝트의 Firebase 메일 링크를 입력하세요.');
+    params.delete('mode');
+    params.delete('oobCode');
+    for (const name of ['mode', 'oobCode'])
+      for (const value of link.searchParams.getAll(name)) params.append(name, value);
+    mode = params.get('mode');
+    code = params.get('oobCode');
+    importForm.reset();
+    void loadAction();
+  } catch (reason) {
+    message(errorMessage(reason), true);
   }
-} catch (reason) {
-  code = '';
-  message(errorMessage(reason), true);
+});
+
+async function loadAction() {
+  try {
+    if (
+      !Object.hasOwn(titles, mode) ||
+      params.getAll('mode').length !== 1 ||
+      !code ||
+      code.length > 4096 ||
+      params.getAll('oobCode').length !== 1
+    )
+      throw new Error('유효한 이메일 링크가 없습니다. 메일의 링크에서 다시 여세요.');
+    document.querySelector('#title').textContent = titles[mode];
+    document.title = titles[mode];
+    // 메일 URL의 apiKey는 사용하지 않고, 이 사이트의 Firebase 설정으로 검증합니다.
+    const action = await inspectEmailAction(mode, code);
+    document.querySelector('#email').textContent = action.email ?? '';
+    section.hidden = false;
+    importForm.hidden = true;
+    message('');
+    if (mode === 'resetPassword') {
+      form.hidden = false;
+      form.elements.password.focus();
+    } else {
+      confirmation.hidden = false;
+      confirmation.textContent = `${titles[mode]} 확인`;
+    }
+  } catch (reason) {
+    code = '';
+    message(errorMessage(reason), true);
+  }
 }
+if (code) void loadAction();
+else message('받은 메일에서 링크 주소를 복사해 입력하세요.');
