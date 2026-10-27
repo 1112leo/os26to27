@@ -36,11 +36,9 @@ export function rankResults(results) {
     (a, b) =>
       compareScores(a, b) || a.completedAt.localeCompare(b.completedAt) || a.id.localeCompare(b.id),
   );
-  return sorted.map((result, index) => ({
-    ...result,
-    rank:
-      index > 0 && compareScores(result, sorted[index - 1]) === 0
-        ? sorted.findIndex((previous) => compareScores(result, previous) === 0) + 1
-        : index + 1,
-  }));
+  let rank = 0;
+  return sorted.map((result, index) => {
+    if (index === 0 || compareScores(result, sorted[index - 1]) !== 0) rank = index + 1;
+    return { ...result, rank };
+  });
 }

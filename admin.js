@@ -1,6 +1,5 @@
 import {
   adminContext,
-  adminSession,
   loginAdmin,
   logoutAdmin,
   watchAdminSession,
@@ -28,13 +27,18 @@ import {
   deleteTyping,
   reviewTyping,
   readChallenges,
-  readChallenge,
   readEvent,
   setEvent,
   saveChallenge,
   changeChallenge,
 } from './database.js';
-import { escapeHtml as html, localHref, downloadFile, koreanDate } from './common.js';
+import {
+  escapeHtml as html,
+  localHref,
+  downloadFile,
+  koreanDate,
+  normalizeText,
+} from './common.js';
 import { rankResults, calculateScore, countKeystrokes } from './typing/scoring.js';
 import {
   pendingResults,
@@ -60,6 +64,65 @@ let letterPage = 1;
 let resultPage = 1;
 let letterFilter = { query: '', status: '', sort: 'desc' };
 let resultFilter = { query: '', version: '', verification: 'all' };
+let renderedHash = location.hash;
+const savedForms = new WeakMap();
+
+function formState(form) {
+  return JSON.stringify(
+    [...form.elements]
+      .filter((control) => control.name)
+      .map((control) => [
+        control.name,
+        control.type === 'checkbox' ? control.checked : control.value,
+      ]),
+  );
+}
+function dirtyForms(container = root) {
+  const forms = container?.matches('form')
+    ? [container]
+    : [...(container?.querySelectorAll('form') ?? [])];
+  return forms.filter((form) => savedForms.has(form) && savedForms.get(form) !== formState(form));
+}
+function confirmDiscard(container = root) {
+  const forms = dirtyForms(container);
+  if (forms.length && !confirm('저장하지 않은 변경을 버릴까요?')) return false;
+  forms.forEach((form) => {
+    for (const [name, value] of JSON.parse(savedForms.get(form))) {
+      const control = [...form.elements].find((element) => element.name === name);
+      if (control.type === 'checkbox') control.checked = value;
+      else control.value = value;
+    }
+  });
+  return true;
+}
+function closeEditor() {
+  if (confirmDiscard($('#editor'))) $('#editor').replaceChildren();
+}
+function restoreHash() {
+  const url = new URL(location.href);
+  url.hash = renderedHash;
+  history.replaceState(history.state, '', url);
+}
+function applySession(next) {
+  const entering = !session.authenticated || next.uid !== session.uid;
+  session = next;
+  if (!next.authenticated) {
+    letters = [];
+    results = [];
+    challenges = [];
+    config = undefined;
+    if (!$('#login')) showLogin();
+  } else if (entering) showAdmin();
+  else if ($('#identity')) $('#identity').textContent = next.email ?? '';
+}
+function sessionFailed(reason) {
+  session = { authenticated: false };
+  letters = [];
+  results = [];
+  challenges = [];
+  config = undefined;
+  showLogin(errorMessage(reason));
+}
 
 const field = (name, label, value = '', type = 'text', attrs = '') =>
   `<label>${html(label)}<input name="${name}" type="${type}" value="${html(value)}" ${attrs}></label>`;
@@ -79,13 +142,15 @@ const alertError = (reason) => setStatus(errorMessage(reason), true);
 function setStatus(text = '', error = false) {
   const element = $('#status');
   if (!element) return;
+  element.setAttribute('role', error ? 'alert' : 'status');
   element.textContent = text;
   element.className = error ? 'error' : 'notice';
   element.hidden = !text;
 }
-async function run(form, work) {
+async function run(work) {
   if (busy) return;
   busy = true;
+  root.setAttribute('aria-busy', 'true');
   setStatus('처리 중');
   const controls = [...root.querySelectorAll('button, input, textarea, select')];
   const previous = controls.map((control) => control.disabled);
@@ -97,13 +162,22 @@ async function run(form, work) {
   } finally {
     controls.forEach((control, index) => (control.disabled = previous[index]));
     busy = false;
+    root.setAttribute('aria-busy', 'false');
+    if (session.authenticated && location.hash !== renderedHash) {
+      if (confirmDiscard()) void renderTab();
+      else restoreHash();
+    }
   }
 }
 function submit(form, work) {
+  if (form.id !== 'login') savedForms.set(form, formState(form));
   form.addEventListener('submit', (event) => {
     event.preventDefault();
     const values = data(form);
-    void run(form, () => work(values));
+    void run(async () => {
+      const saved = await work(values);
+      if (saved !== false && form.isConnected) savedForms.set(form, formState(form));
+    });
   });
 }
 function showLogin(error = '') {
@@ -115,11 +189,10 @@ function showLogin(error = '') {
       <div class="actions"><button type="submit">로그인</button><button type="button" id="reset-password">비밀번호 재설정</button></div></form>`;
   if (error) setStatus(error, true);
   submit($('#login'), async (values) => {
-    session = await loginAdmin(values.email, values.password);
-    showAdmin();
+    applySession(await loginAdmin(values.email, values.password));
   });
   $('#reset-password').onclick = () =>
-    void run($('#login'), async () => {
+    void run(async () => {
       const email = $('#login [name=email]').value;
       if (!email) throw new Error('이메일을 입력하세요.');
       await resetAdminPassword(email);
@@ -132,55 +205,76 @@ function showAdmin() {
     <nav class="admin-nav" aria-label="관리자 메뉴"><a href="#${firstTab}">${feature === 'typing' ? '타자 기록' : '글'}</a><a href="#settings">설정</a><a href="#account">계정</a></nav>
     <p id="status" role="status" hidden></p><div id="view"></div>`;
   $('#logout').onclick = () =>
-    void run(null, async () => {
+    void run(async () => {
+      if (!confirmDiscard()) {
+        setStatus();
+        return;
+      }
       await logoutAdmin();
-      session = { authenticated: false };
-      letters = [];
-      results = [];
-      showLogin();
+      applySession({ authenticated: false });
     });
   void renderTab();
 }
 async function renderTab() {
-  if (!session.authenticated) return;
+  if (!session.authenticated || !confirmDiscard()) return;
   const sequence = ++viewSequence;
+  renderedHash = location.hash;
   const tab = ['settings', 'account', firstTab].includes(location.hash.slice(1))
     ? location.hash.slice(1)
     : firstTab;
-  document
-    .querySelectorAll('.admin-nav a')
-    .forEach((link) => link.classList.toggle('active', link.hash === `#${tab}`));
+  document.querySelectorAll('.admin-nav a').forEach((link) => {
+    const active = link.hash === `#${tab}`;
+    link.classList.toggle('active', active);
+    if (active) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  });
   $('#view').textContent = '불러오는 중';
+  $('#view').setAttribute('aria-busy', 'true');
   setStatus();
   try {
     const { db } = await adminContext();
-    if (tab === 'letters') letters = await readLetters(db);
-    if (tab === 'records')
-      [results, challenges] = await Promise.all([readTyping(db), readChallenges(db)]);
+    let loaded;
+    if (tab === 'letters') loaded = await readLetters(db);
+    if (tab === 'records') loaded = await Promise.all([readTyping(db), readChallenges(db)]);
     if (tab === 'settings')
-      [config, challenges] = await Promise.all([
-        readEvent(db).catch(() => null),
-        readChallenges(db),
-      ]);
+      loaded = await Promise.all([readEvent(db).catch(() => null), readChallenges(db)]);
     if (sequence !== viewSequence) return;
-    if (tab === 'letters') lettersView();
-    else if (tab === 'records') await recordsView();
-    else if (tab === 'settings') settingsView();
-    else await accountView(db);
+    if (tab === 'letters') {
+      letters = loaded;
+      lettersView();
+    } else if (tab === 'records') {
+      [results, challenges] = loaded;
+      await recordsView();
+    } else if (tab === 'settings') {
+      [config, challenges] = loaded;
+      settingsView();
+    } else await accountView(db, sequence);
   } catch (reason) {
     if (sequence === viewSequence) {
       $('#view').innerHTML = '<button id="retry-view">다시 불러오기</button>';
       $('#retry-view').onclick = renderTab;
       alertError(reason);
     }
+  } finally {
+    if (sequence === viewSequence) $('#view')?.setAttribute('aria-busy', 'false');
   }
 }
 window.addEventListener('hashchange', () => {
   if (busy) return;
+  if (!confirmDiscard()) {
+    restoreHash();
+    return;
+  }
   void renderTab();
 });
 root.addEventListener('click', (event) => {
-  if (busy && event.target.closest('a[href^="#"]')) event.preventDefault();
+  if (!event.target.closest('a')) return;
+  if (busy || !confirmDiscard()) event.preventDefault();
+});
+window.addEventListener('beforeunload', (event) => {
+  if (!busy && !dirtyForms().length) return;
+  event.preventDefault();
+  event.returnValue = '';
 });
 
 function lettersView() {
@@ -204,7 +298,7 @@ function lettersView() {
     renderLetters();
   };
   $('#sync-public').onclick = () =>
-    void run(null, async () =>
+    void run(async () =>
       setStatus(`${await synchronizePublicLetters((await adminContext()).db)}건 반영`),
     );
   bindExports();
@@ -214,7 +308,7 @@ function bindExports() {
   document.querySelectorAll('[data-export]').forEach(
     (button) =>
       (button.onclick = () =>
-        void run(null, async () => {
+        void run(async () => {
           const [scope, format] = button.dataset.export.split(':');
           const file = await exportFirebase(scope, format);
           downloadFile(file.filename, file.content, file.mime);
@@ -266,7 +360,7 @@ function renderLetters() {
     (button) =>
       (button.onclick = () => {
         if (!confirm('글을 삭제할까요? 공개 내용도 삭제되며 되돌릴 수 없습니다.')) return;
-        void run(null, async () => {
+        void run(async () => {
           await deleteLetter((await adminContext()).db, button.dataset.delete);
           letters = letters.filter((item) => item.id !== button.dataset.delete);
           renderLetters();
@@ -280,6 +374,8 @@ function renderLetters() {
   });
 }
 function letterEditor(letter) {
+  if (!confirmDiscard($('#editor'))) return;
+  const creationKey = crypto.randomUUID();
   $('#editor').innerHTML =
     `<form id="letter-editor" class="panel"><h2>${letter ? '글 수정' : '글 추가'}</h2>
     ${field('nickname', '별명', letter?.nickname ?? '', 'text', 'maxlength="30"')}${area('content', '본문', letter?.content ?? '')}
@@ -288,15 +384,21 @@ function letterEditor(letter) {
     ${letter ? '' : checkbox('consent', '작성자의 공개 동의를 확인했습니다.')}
     <div class="actions"><button>저장</button><button type="button" id="close-editor">취소</button></div></form>`;
   $('#editor').scrollIntoView({ block: 'start' });
-  $('#close-editor').onclick = () => $('#editor').replaceChildren();
+  $('#close-editor').onclick = closeEditor;
   submit($('#letter-editor'), async (values) => {
     if (!letter && !values.consent) throw new Error('공개 동의를 확인하세요.');
     const { db, uid } = await adminContext();
-    const saved = await saveLetter(db, uid, letter?.id ?? null, {
-      ...values,
-      published_content: values.published_content || null,
-      publish_order: values.publish_order === '' ? null : Number(values.publish_order),
-    });
+    const saved = await saveLetter(
+      db,
+      uid,
+      letter?.id ?? null,
+      {
+        ...values,
+        published_content: values.published_content || null,
+        publish_order: values.publish_order === '' ? null : Number(values.publish_order),
+      },
+      creationKey,
+    );
     letters = [saved, ...letters.filter((item) => item.id !== saved.id)];
     $('#editor').replaceChildren();
     renderLetters();
@@ -341,7 +443,7 @@ async function recordsView() {
       'application/json',
     );
   $('#sync-pending').onclick = () =>
-    void run(null, async () => {
+    void run(async () => {
       const result = await synchronizePending();
       setStatus(
         `${result.synced}건 접수 · ${result.remaining}건 미전송${result.error ? ` · ${result.error}` : ''}`,
@@ -351,7 +453,7 @@ async function recordsView() {
       await pendingCount();
     });
   $('#local-json').onclick = () =>
-    void run(null, async () => {
+    void run(async () => {
       downloadFile(
         'typing-local.json',
         JSON.stringify({ schemaVersion: 1, results: await listLocalResults() }, null, 2),
@@ -363,10 +465,12 @@ async function recordsView() {
   await pendingCount();
 }
 async function pendingCount() {
+  const element = $('#pending-count');
+  if (!element) return;
   try {
-    $('#pending-count').textContent = `미전송 ${(await pendingResults()).length}건`;
+    element.textContent = `미전송 ${(await pendingResults()).length}건`;
   } catch {
-    $('#pending-count').textContent = '기기 저장소 사용 불가';
+    element.textContent = '기기 저장소 사용 불가';
   }
 }
 function filteredResults() {
@@ -401,13 +505,18 @@ function renderResults() {
   document.querySelectorAll('[name^="review-"]').forEach(
     (control) =>
       (control.onchange = () =>
-        void run(null, async () => {
+        void run(async () => {
           const id = control.name.slice(7);
           const patch = {
             verificationStatus: control.value,
             ...(control.value !== 'verified' ? { prizeReceived: false } : {}),
           };
-          await reviewTyping((await adminContext()).db, id, patch);
+          try {
+            await reviewTyping((await adminContext()).db, id, patch);
+          } catch (reason) {
+            control.value = results.find((item) => item.id === id)?.verificationStatus ?? 'pending';
+            throw reason;
+          }
           Object.assign(
             results.find((item) => item.id === id),
             patch,
@@ -419,7 +528,7 @@ function renderResults() {
   document.querySelectorAll('[data-prize]').forEach(
     (button) =>
       (button.onclick = () =>
-        void run(null, async () => {
+        void run(async () => {
           const item = results.find((item) => item.id === button.dataset.prize);
           const patch = { prizeReceived: !item.prizeReceived };
           await reviewTyping((await adminContext()).db, item.id, patch);
@@ -439,7 +548,7 @@ function renderResults() {
     (button) =>
       (button.onclick = () => {
         if (!confirm('기록을 삭제할까요? 되돌릴 수 없습니다.')) return;
-        void run(null, async () => {
+        void run(async () => {
           await deleteTyping((await adminContext()).db, button.dataset.delete);
           results = results.filter((item) => item.id !== button.dataset.delete);
           renderResults();
@@ -453,6 +562,8 @@ function renderResults() {
   });
 }
 function resultEditor(result) {
+  if (!confirmDiscard($('#editor'))) return;
+  const creationKey = crypto.randomUUID();
   $('#editor').innerHTML =
     `<form id="result-editor" class="panel"><h2>${result ? '기록 수정' : '기록 추가'}</h2>
     <div class="form-grid">${field('participantId', '참가번호', result?.participantId, 'text', 'required maxlength="30"')}${field('displayName', '표시 이름', result?.displayName, 'text', 'required maxlength="30"')}</div>
@@ -466,7 +577,7 @@ function resultEditor(result) {
     ${select('verificationStatus', '확인 상태', result?.verificationStatus ?? 'pending', Object.entries(verification))}<p id="score-preview"></p>
     <div class="actions"><button>저장</button><button id="close-editor" type="button">취소</button></div></form>`;
   $('#editor').scrollIntoView({ block: 'start' });
-  $('#close-editor').onclick = () => $('#editor').replaceChildren();
+  $('#close-editor').onclick = closeEditor;
   const form = $('#result-editor');
   form.oninput = () => {
     const values = data(form);
@@ -485,16 +596,24 @@ function resultEditor(result) {
   submit(form, async (values) => {
     const { db, uid } = await adminContext();
     const challenge = challenges.find((item) => item.challengeId === values.challengeId);
-    await saveTyping(db, uid, result?.id ?? null, {
-      participantId: values.participantId,
-      displayName: values.displayName,
-      challengeId: values.challengeId,
-      elapsedMs: Number(values.seconds) * 1000,
-      errors: Number(values.errors),
-      verificationStatus: values.verificationStatus,
-      prizeReceived:
-        !!result?.prizeReceived && !challenge.practice && values.verificationStatus === 'verified',
-    });
+    await saveTyping(
+      db,
+      uid,
+      result?.id ?? null,
+      {
+        participantId: values.participantId,
+        displayName: values.displayName,
+        challengeId: values.challengeId,
+        elapsedMs: Number(values.seconds) * 1000,
+        errors: Number(values.errors),
+        verificationStatus: values.verificationStatus,
+        prizeReceived:
+          !!result?.prizeReceived &&
+          !challenge.practice &&
+          values.verificationStatus === 'verified',
+      },
+      creationKey,
+    );
     results = await readTyping(db);
     $('#editor').replaceChildren();
     renderResults();
@@ -529,6 +648,7 @@ function settingsView() {
     });
     setStatus('저장 완료');
     config = await readEvent((await adminContext()).db);
+    if (feature === 'typing') renderChallenges();
   });
   if (feature !== 'typing') return;
   $('#new-challenge').onclick = () => challengeEditor();
@@ -553,9 +673,10 @@ function renderChallenges() {
       challengeEditor(item);
       return;
     }
+    if (!confirmDiscard()) return;
     if (button.dataset.delete && !confirm('문구를 삭제 목록에 보관할까요? 기존 기록은 유지됩니다.'))
       return;
-    void run(null, async () => {
+    void run(async () => {
       await changeChallenge(
         (await adminContext()).db,
         id,
@@ -572,21 +693,35 @@ function renderChallenges() {
   };
 }
 function challengeEditor(challenge) {
+  if (!confirmDiscard($('#editor'))) return;
+  let creationKey = crypto.randomUUID();
+  let previousIntent;
   $('#editor').innerHTML =
     `<form id="challenge-editor" class="panel"><h2>문구 ${challenge ? '수정' : '추가'}</h2>
     ${field('title', '제목', challenge?.title, 'text', 'required maxlength="80"')}${area('text', '문구', challenge?.text)}${checkbox('practice', '연습', challenge?.practice ?? true)}
     <p class="muted">본문·연습 여부 변경은 새 버전으로 저장됩니다. 사용 문구는 운영 설정에서 선택하세요.</p><p id="keys"></p><div class="actions"><button>저장</button><button type="button" id="close-editor">취소</button></div></form>`;
   $('#editor').scrollIntoView({ block: 'start' });
-  $('#close-editor').onclick = () => $('#editor').replaceChildren();
+  $('#close-editor').onclick = closeEditor;
   $('#challenge-editor').oninput = (event) => {
     $('#keys').textContent =
       `${countKeystrokes(event.currentTarget.elements.text.value.trim().replace(/\s+/g, ' '))}타`;
   };
   submit($('#challenge-editor'), async (values) => {
+    if (!confirmDiscard($('#event-settings'))) {
+      setStatus();
+      return false;
+    }
+    const intent = JSON.stringify([
+      normalizeText(values.text).replace(/\s+/g, ' '),
+      !!values.practice,
+    ]);
+    if (previousIntent && intent !== previousIntent) creationKey = crypto.randomUUID();
+    previousIntent = intent;
     const id = await saveChallenge(
       (await adminContext()).db,
       { title: values.title, text: values.text, practice: !!values.practice },
       challenge,
+      creationKey,
     );
     challenges = await readChallenges((await adminContext()).db);
     settingsView();
@@ -598,19 +733,14 @@ function challengeEditor(challenge) {
   });
 }
 
-async function accountView(db) {
+async function accountView(db, sequence = viewSequence) {
   const roles = await withDeadline(getDocs(collection(db, 'admins')));
+  if (sequence !== viewSequence || !session.authenticated) return;
   $('#view').innerHTML =
     `<section class="panel"><h2>계정</h2><p>이메일: ${html(session.email)}</p><p>UID: <code>${html(session.uid)}</code></p>
     <form id="password"><h3>비밀번호 변경</h3>${field('current', '현재 비밀번호', '', 'password', 'required autocomplete="current-password"')}${field('next', '새 비밀번호', '', 'password', 'required minlength="12" autocomplete="new-password"')}${field('confirmation', '새 비밀번호 확인', '', 'password', 'required minlength="12" autocomplete="new-password"')}<button>변경</button></form>
     <form id="email"><h3>이메일 변경</h3>${field('email', '새 이메일', '', 'email', 'required')}${field('current', '현재 비밀번호', '', 'password', 'required autocomplete="current-password"')}<button>확인 메일 전송</button></form></section>
-    <section class="panel"><h2>관리자 권한</h2><ul class="review-list">${roles.docs
-      .filter((item) => item.data().enabled)
-      .map(
-        (item) =>
-          `<li>${html(item.id === session.uid ? session.email : item.data().email || item.id)} ${item.id === session.uid ? '(현재 계정)' : `<button class="danger" data-revoke="${html(item.id)}">권한 해제</button>`}</li>`,
-      )
-      .join('')}</ul>
+    <section class="panel"><h2>관리자 권한</h2><ul class="review-list" id="operators">${operatorItems(roles)}</ul>
     <form id="operator"><h3>관리자 추가</h3>${field('email', '이메일', '', 'email', 'required maxlength="254"')}${field('password', '초기 비밀번호', '', 'password', 'minlength="12" autocomplete="new-password"')}
     <details><summary>기존 계정에 권한 추가</summary>${field('uid', '기존 UID', '', 'text', 'maxlength="128"')}</details><button>추가</button></form></section>`;
   submit($('#password'), async (values) => {
@@ -634,18 +764,37 @@ async function accountView(db) {
         }),
       );
     else await createOperator(values.email, values.password);
-    await accountView((await adminContext()).db);
+    $('#operator').reset();
+    await refreshOperators((await adminContext()).db, sequence);
     setStatus('추가 완료');
   });
+  bindOperatorActions(sequence);
+}
+function operatorItems(roles) {
+  return roles.docs
+    .filter((item) => item.data().enabled)
+    .map(
+      (item) =>
+        `<li>${html(item.id === session.uid ? session.email : item.data().email || item.id)} ${item.id === session.uid ? '(현재 계정)' : `<button class="danger" data-revoke="${html(item.id)}">권한 해제</button>`}</li>`,
+    )
+    .join('');
+}
+async function refreshOperators(db, sequence) {
+  const roles = await withDeadline(getDocs(collection(db, 'admins')));
+  if (sequence !== viewSequence || !$('#operators')) return;
+  $('#operators').innerHTML = operatorItems(roles);
+  bindOperatorActions(sequence);
+}
+function bindOperatorActions(sequence) {
   document.querySelectorAll('[data-revoke]').forEach(
     (button) =>
       (button.onclick = () => {
         if (!confirm('관리자 권한을 해제할까요?')) return;
-        void run(null, async () => {
+        void run(async () => {
           await withDeadline(
             deleteDoc(doc((await adminContext()).db, 'admins', button.dataset.revoke)),
           );
-          await accountView((await adminContext()).db);
+          await refreshOperators((await adminContext()).db, sequence);
           setStatus('권한 해제 완료');
         });
       }),
@@ -653,19 +802,7 @@ async function accountView(db) {
 }
 
 try {
-  await watchAdminSession(
-    (next) => {
-      const entering = !session.authenticated || next.uid !== session.uid;
-      session = next;
-      if (!next.authenticated) {
-        letters = [];
-        results = [];
-        showLogin();
-      } else if (entering) showAdmin();
-      else if ($('#identity')) $('#identity').textContent = next.email ?? '';
-    },
-    (reason) => showLogin(errorMessage(reason)),
-  );
+  await watchAdminSession(applySession, sessionFailed);
 } catch (reason) {
-  showLogin(errorMessage(reason));
+  sessionFailed(reason);
 }

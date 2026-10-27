@@ -74,12 +74,15 @@ export function downloadFile(filename, contents, mime) {
   link.remove();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
-export const koreanDate = (date) =>
-  new Intl.DateTimeFormat('ko-KR', {
-    timeZone: 'Asia/Seoul',
-    dateStyle: 'short',
-    timeStyle: 'short',
-  }).format(new Date(date));
+const dateFormatter = new Intl.DateTimeFormat('ko-KR', {
+  timeZone: 'Asia/Seoul',
+  dateStyle: 'short',
+  timeStyle: 'short',
+});
+export function koreanDate(date) {
+  const timestamp = Date.parse(date);
+  return Number.isFinite(timestamp) ? dateFormatter.format(timestamp) : '—';
+}
 export function makePublicData(letters, now = new Date().toISOString()) {
   return {
     schemaVersion: 1,

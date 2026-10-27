@@ -238,9 +238,10 @@ function publicLetter(id, data) {
     sort_order: data.publish_order ?? 1000001,
   };
 }
-export async function saveLetter(db, uid, id, input) {
+// 생성 요청 재시도에는 같은 creationKey를 사용합니다.
+export async function saveLetter(db, uid, id, input, creationKey = crypto.randomUUID()) {
   const data = letterEdit(input);
-  const key = id ?? crypto.randomUUID();
+  const key = id ?? creationKey;
   if (!UUID_PATTERN.test(key)) throw new ClientError('글 ID가 올바르지 않습니다.', 400);
   await withDeadline(
     runTransaction(db, async (tx) => {
@@ -412,7 +413,7 @@ export async function readChallenges(db) {
     };
   });
 }
-export async function saveChallenge(db, input, previous) {
+export async function saveChallenge(db, input, previous, creationKey = crypto.randomUUID()) {
   const title = normalizeText(input.title);
   const text = normalizeText(input.text).replace(/\s+/g, ' ');
   if (!title || unicodeLength(title) > 80 || !text || unicodeLength(text) > 1000)
@@ -420,7 +421,9 @@ export async function saveChallenge(db, input, previous) {
   const id =
     previous && previous.text === text && previous.practice === input.practice
       ? previous.challengeId
-      : crypto.randomUUID();
+      : creationKey;
+  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id))
+    throw new ClientError('문구 ID가 올바르지 않습니다.', 400);
   await withDeadline(
     setDoc(doc(db, 'challenges', id), {
       title,
@@ -436,7 +439,7 @@ export async function saveChallenge(db, input, previous) {
 export async function changeChallenge(db, id, patch) {
   await withDeadline(updateDoc(doc(db, 'challenges', id), patch));
 }
-export async function saveTyping(db, uid, id, input) {
+export async function saveTyping(db, uid, id, input, creationKey = crypto.randomUUID()) {
   const challenge = await readChallenge(db, input.challengeId);
   const computed = calculateScore(challenge.referenceKeystrokes, input.elapsedMs, input.errors);
   const data = {
@@ -457,27 +460,29 @@ export async function saveTyping(db, uid, id, input) {
     (input.prizeReceived && (challenge.practice || data.verificationStatus !== 'verified'))
   )
     throw new ClientError('참가 정보·시간·오타와 상품 수령 조건을 확인해 주세요.', 400);
-  const key = id ?? crypto.randomUUID();
+  const key = id ?? creationKey;
   if (!UUID_PATTERN.test(key)) throw new ClientError('기록 ID가 올바르지 않습니다.', 400);
   const ref = doc(db, 'typingResults', key);
-  if (id)
-    await withDeadline(
-      updateDoc(ref, {
-        ...data,
-        reviewed_at: serverTimestamp(),
-      }),
-    );
-  else
-    await withDeadline(
-      setDoc(ref, {
-        ...data,
-        id: key,
-        owner_uid: uid,
-        completedAt: new Date().toISOString(),
-        received_at: serverTimestamp(),
-        reviewed_at: serverTimestamp(),
-      }),
-    );
+  await withDeadline(
+    runTransaction(db, async (tx) => {
+      const previous = await tx.get(ref);
+      if (id && !previous.exists())
+        throw new ClientError('이미 삭제된 기록입니다. 목록을 새로고침해 주세요.', 404);
+      tx.set(
+        ref,
+        previous.exists()
+          ? { ...previous.data(), ...data, reviewed_at: serverTimestamp() }
+          : {
+              ...data,
+              id: key,
+              owner_uid: uid,
+              completedAt: new Date().toISOString(),
+              received_at: serverTimestamp(),
+              reviewed_at: serverTimestamp(),
+            },
+      );
+    }),
+  );
   return key;
 }
 export async function deleteTyping(db, id) {

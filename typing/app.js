@@ -65,6 +65,7 @@ function updateControls() {
   elements.start.disabled =
     loading || !config?.typingEnabled || !challenge?.enabled || challenge.deleted;
   elements.start.textContent = loading ? '확인 중' : '시작';
+  elements['participant-form'].setAttribute('aria-busy', String(loading));
   elements['typing-input'].disabled = !active;
   elements.stop.hidden = !active;
   elements.retry.hidden = status !== 'failed';
@@ -297,7 +298,7 @@ elements.backup.addEventListener('click', () => {
   if (result)
     downloadFile(`typing-${result.id}.json`, JSON.stringify(result, null, 2), 'application/json');
 });
-elements.reset.addEventListener('click', () => {
+elements.reset.addEventListener('click', async () => {
   attempt = null;
   participant = null;
   engine = initialInputState();
@@ -312,7 +313,11 @@ elements.reset.addEventListener('click', () => {
   elements.result.hidden = true;
   transition('ready');
   message('시작 후 직접 입력하세요.');
-  void refresh().catch(() => {});
+  try {
+    await refresh();
+  } catch {
+    // refresh() retains the retry control and connection error.
+  }
   elements['participant-id'].focus();
 });
 

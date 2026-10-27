@@ -23,7 +23,7 @@ let pending = null;
 let busy = false;
 let accepted = false;
 let config = null;
-let loadingEvent = false;
+let eventRequest = null;
 
 function showError(message = '') {
   error.textContent = message;
@@ -35,37 +35,40 @@ function updateControls() {
   nickname.disabled = locked;
   content.disabled = locked;
   consent.disabled = locked;
-  submitButton.disabled = busy || (!pending && !config?.submissionsEnabled);
+  submitButton.disabled = busy || !!eventRequest || (!pending && !config?.submissionsEnabled);
   submitButton.textContent = busy ? '제출 중' : pending ? '다시 제출' : '제출';
   resetButton.disabled =
     busy || (!nickname.value && !content.value && !consent.checked && !pending);
   pendingStatus.hidden = !pending || busy;
-  retryEvent.disabled = loadingEvent || busy;
+  retryEvent.disabled = !!eventRequest || busy;
+  form.setAttribute('aria-busy', String(busy));
   const length = unicodeLength(normalizeText(content.value));
   counter.textContent = `${length} / 700자 · 최소 10자`;
   counter.className = length > 700 ? 'error' : 'muted';
 }
 
-async function checkEvent() {
-  if (loadingEvent) return;
-  loadingEvent = true;
-  updateControls();
+function checkEvent() {
+  if (eventRequest) return eventRequest;
   eventStatus.textContent = '접수 상태 확인 중';
-  try {
-    config = await readEvent((await getClients()).deviceDb);
-    eventStatus.textContent = config.submissionsEnabled ? '접수 중' : '접수 마감';
-    retryEvent.hidden = config.submissionsEnabled;
-    return config;
-  } catch (reason) {
-    config = null;
-    eventStatus.textContent = '접수 상태 확인 실패';
-    retryEvent.hidden = false;
-    showError(errorMessage(reason));
-    return null;
-  } finally {
-    loadingEvent = false;
-    updateControls();
-  }
+  eventRequest = (async () => {
+    try {
+      config = await readEvent((await getClients()).deviceDb);
+      eventStatus.textContent = config.submissionsEnabled ? '접수 중' : '접수 마감';
+      retryEvent.hidden = config.submissionsEnabled;
+      return config;
+    } catch (reason) {
+      config = null;
+      eventStatus.textContent = '접수 상태 확인 실패';
+      retryEvent.hidden = false;
+      showError(errorMessage(reason));
+      return null;
+    } finally {
+      eventRequest = null;
+      updateControls();
+    }
+  })();
+  updateControls();
+  return eventRequest;
 }
 
 form.addEventListener('input', updateControls);
@@ -114,6 +117,7 @@ form.addEventListener('submit', async (event) => {
     eventStatus.hidden = true;
     retryEvent.hidden = true;
     complete.scrollIntoView({ block: 'start' });
+    complete.focus({ preventScroll: true });
     try {
       sessionStorage.setItem('ohsung-last-receipt', receipt.id);
     } catch {

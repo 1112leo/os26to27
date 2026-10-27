@@ -29,10 +29,11 @@ import {
   serverTimestamp,
 } from 'https://www.gstatic.com/firebasejs/13.1.0/firebase-firestore.js';
 export class ClientError extends Error {
-  status;
-  code;
   constructor(message, status = 0, code = 'UNKNOWN') {
-    (super(message), (this.status = status), (this.code = code));
+    super(message);
+    this.name = 'ClientError';
+    this.status = status;
+    this.code = code;
   }
 }
 export function firebaseError(error) {
@@ -116,8 +117,6 @@ async function initialize() {
     new URLSearchParams(location.search).get('emulator') === '1';
   let config;
   if (emulator) {
-    if (!['localhost', '127.0.0.1'].includes(location.hostname))
-      throw new ClientError('에뮬레이터는 로컬 개발 주소에서만 사용할 수 있습니다.');
     config = {
       apiKey: 'demo-ohsung-key',
       projectId: 'demo-ohsung',

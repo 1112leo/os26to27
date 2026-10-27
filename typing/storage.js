@@ -99,6 +99,7 @@ export async function saveResult(result, asAdmin = false) {
     await submitTyping(context.db, context.uid, result);
     try {
       await saveLocalResult({ ...queued, syncState: 'synced', syncError: '' });
+      backupSaved = true;
     } catch {
       backupSaved = false;
     }

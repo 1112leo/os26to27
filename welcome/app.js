@@ -15,6 +15,7 @@ let cursors = [undefined];
 let nextCursor;
 let hasNext = false;
 let busy = false;
+let retryPage = 0;
 
 function renderLetter(letter) {
   const article = document.createElement('article');
@@ -33,17 +34,20 @@ function renderLetter(letter) {
 async function load(targetPage = page) {
   if (busy) return;
   busy = true;
+  retryPage = targetPage;
+  letters.setAttribute('aria-busy', 'true');
   error.hidden = true;
   retry.hidden = true;
   previous.disabled = true;
   next.disabled = true;
-  pagination.hidden = true;
-  letters.replaceChildren();
   status.textContent = '불러오는 중';
   try {
     const { deviceDb } = await getClients();
     const config = await readEvent(deviceDb);
     if (!config.welcomeEnabled) {
+      letters.replaceChildren();
+      pagination.hidden = true;
+      hasNext = false;
       status.textContent = '공개 전';
       return;
     }
@@ -62,6 +66,7 @@ async function load(targetPage = page) {
     retry.hidden = false;
   } finally {
     busy = false;
+    letters.setAttribute('aria-busy', 'false');
     previous.disabled = page === 0;
     next.disabled = !hasNext;
   }
@@ -76,5 +81,5 @@ next.addEventListener('click', () => {
   cursors = [...cursors.slice(0, page + 1), nextCursor];
   void load(page + 1).then(() => window.scrollTo(0, 0));
 });
-retry.addEventListener('click', () => void load());
+retry.addEventListener('click', () => void load(retryPage));
 void load();
