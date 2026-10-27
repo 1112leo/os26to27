@@ -13,9 +13,19 @@ export function commitInput(state: InputState, next: string, target: string): In
   const newChars = Array.from(next);
   const targetChars = Array.from(target);
   let prefix = 0;
-  while (prefix < oldChars.length && prefix < newChars.length && oldChars[prefix] === newChars[prefix]) prefix++;
+  while (
+    prefix < oldChars.length &&
+    prefix < newChars.length &&
+    oldChars[prefix] === newChars[prefix]
+  )
+    prefix++;
   let suffix = 0;
-  while (suffix < oldChars.length - prefix && suffix < newChars.length - prefix && oldChars[oldChars.length - 1 - suffix] === newChars[newChars.length - 1 - suffix]) suffix++;
+  while (
+    suffix < oldChars.length - prefix &&
+    suffix < newChars.length - prefix &&
+    oldChars[oldChars.length - 1 - suffix] === newChars[newChars.length - 1 - suffix]
+  )
+    suffix++;
   let errors = state.errors;
   const insertionEnd = newChars.length - suffix;
   // Pure deletions, including selections, must never add errors.
@@ -27,7 +37,9 @@ export function commitInput(state: InputState, next: string, target: string): In
   return { ...state, committed: next, errors };
 }
 
-export function compositionStart(state: InputState): InputState { return { ...state, composing: true }; }
+export function compositionStart(state: InputState): InputState {
+  return { ...state, composing: true };
+}
 export function compositionEnd(state: InputState, next: string, target: string): InputState {
   return commitInput({ ...state, composing: false }, next, target);
 }

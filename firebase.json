@@ -1,11 +1,17 @@
 {
   "auth": {
-    "authorizedDomains": ["os20th.firebaseapp.com", "os20th.web.app", "1112leo.github.io", "localhost", "127.0.0.1"],
+    "authorizedDomains": [
+      "os20th.firebaseapp.com",
+      "os20th.web.app",
+      "1112leo.github.io",
+      "localhost",
+      "127.0.0.1"
+    ],
     "providers": { "anonymous": true, "emailPassword": true }
   },
   "firestore": {
-    "rules": "firestore.rules",
-    "indexes": "firestore.indexes.json"
+    "rules": "firebase/firestore.rules",
+    "indexes": "firebase/firestore.indexes.json"
   },
   "emulators": {
     "auth": { "host": "127.0.0.1", "port": 9098 },

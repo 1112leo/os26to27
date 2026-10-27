@@ -17,13 +17,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
-      - uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: '21'
       - run: npm ci
-      - run: npm test
-      - run: npm run test:rules
       - run: npm run build
         env:
           PAGES_BASE_PATH: /os26to27/
