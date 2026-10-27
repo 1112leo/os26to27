@@ -1,16 +1,24 @@
 import { useEffect } from 'react';
 import { Link, NavLink, Outlet, useLocation } from 'react-router-dom';
 import { EventNotice, EventProvider, useEvent } from './shared/EventContext';
+import { SessionProvider, useAdmin } from './admin/SessionContext';
 
 export function Layout() {
   const location = useLocation();
   useEffect(() => { window.scrollTo(0, 0); }, [location.pathname]);
-  return <EventProvider>
+  return <SessionProvider><EventProvider>
     <a href="#main" className="skip-link">본문으로 바로가기</a>
     <header className="site-header"><div className="header-inner"><Link className="brand" to="/">천안오성고 <span>OHSUNG · 2026 → 2027</span></Link><nav aria-label="주요 메뉴"><NavLink to="/typing">타자 대회</NavLink><NavLink to="/write">후배에게 한마디</NavLink><NavLink to="/welcome">신입생 환영</NavLink></nav></div></header>
+    <AdminBar />
     <main id="main" className="container"><Outlet /></main>
     <footer className="site-footer"><div className="container"><p>천안오성고등학교 행사 · 2027학년도 신입생을 기다리며</p><div><Link to="/typing/results">타자 기록 관리</Link><Link to="/admin">관리자</Link></div></div></footer>
-  </EventProvider>;
+  </EventProvider></SessionProvider>;
+}
+
+function AdminBar() {
+  const { session, logout } = useAdmin();
+  if (!session.authenticated) return null;
+  return <div className="admin-bar container"><span>관리자 모드 · {session.email}</span><button onClick={() => void logout()}>로그아웃</button></div>;
 }
 
 export function HomePage() {

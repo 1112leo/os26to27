@@ -13,7 +13,7 @@ export default function WelcomePage() {
     async function load() {
       setError('');
       try {
-        const response = await fetch('/data/welcome.json', { signal: abort.signal, cache: 'no-cache' });
+        const response = await fetch(`${import.meta.env.BASE_URL}data/welcome.json`, { signal: abort.signal, cache: 'no-cache' });
         if (!response.ok) throw new Error();
         const payload: unknown = await response.json();
         if (!validatePublicData(payload)) throw new Error();

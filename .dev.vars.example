@@ -1,4 +1,0 @@
-# Copy to .dev.vars, or run npm run admin:setup -- --local.
-# Never put secrets in VITE_ variables.
-ADMIN_PASSWORD_HASH=pbkdf2$100000$REPLACE_SALT$REPLACE_HASH
-SESSION_SECRET=REPLACE_WITH_A_RANDOM_SECRET_AT_LEAST_32_CHARACTERS

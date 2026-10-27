@@ -3,7 +3,7 @@ import { mkdir, writeFile } from 'node:fs/promises';
 
 try {
   const url = new URL(process.argv[2]);
-  if (url.protocol !== 'https:' || url.pathname !== '/welcome' || url.search || url.hash || url.username || url.password) throw new Error();
+  if (url.protocol !== 'https:' || !/^\/(?:[a-zA-Z0-9_-]+\/)?welcome\/?$/.test(url.pathname) || url.search || url.hash || url.username || url.password) throw new Error();
   await mkdir('artifacts', { recursive: true });
   await QRCode.toFile('artifacts/welcome-qr.png', url.href, { width: 1600, margin: 4, errorCorrectionLevel: 'M' });
   await writeFile('artifacts/welcome-qr.svg', await QRCode.toString(url.href, { type: 'svg', margin: 4, errorCorrectionLevel: 'M' }));

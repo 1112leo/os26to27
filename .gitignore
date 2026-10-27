@@ -9,3 +9,9 @@ backups/
 artifacts/
 *.log
 worker-configuration.d.ts
+.firebase/
+firebase-debug.log*
+firestore-debug.log*
+ui-debug.log*
+service-account*.json
+*-adminsdk-*.json

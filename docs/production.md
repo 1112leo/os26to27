@@ -1,5 +1,7 @@
 # os26to27 프로덕션
 
+> 기존 `main`의 Cloudflare 운영 기록입니다. 별도 GitHub Pages + Firebase 시험 버전은 [README](../README.md)를 확인하세요. 아래 사이트·D1은 보존하며 이번 시험 배포로 교체하지 않습니다.
+
 - 사이트: https://os26to27.pages.dev
 - 저장소: https://github.com/1112leo/os26to27
 - 프로덕션 브랜치: `main`

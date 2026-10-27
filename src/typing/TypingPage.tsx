@@ -73,7 +73,7 @@ export default function TypingPage() {
   async function persist(record: TypingResult) {
     if (saving.current) return;
     saving.current = true; transition('saving');
-    try { await saveResult(record); transition('saved'); setMessage('이 기기에 기록을 저장했습니다. 다음 참가자를 받을 수 있습니다.'); }
+    try { const saved = await saveResult(record); transition('saved'); setMessage(`서버에 기록을 저장했습니다. 운영진 확인 대기 상태입니다. 다음 참가자를 받을 수 있습니다.${saved.backupSaved ? '' : ' 기기 백업은 저장하지 못했으니 운영진에게 알려 주세요.'}`); }
     catch (err) { transition('failed'); setMessage(errorMessage(err)); }
     finally { saving.current = false; }
   }
@@ -148,7 +148,7 @@ export default function TypingPage() {
       {status === 'failed' && result && <div className="actions"><button onClick={() => void persist(result)}>저장 재시도</button><button onClick={() => downloadFile(`typing-${result.participantId}.json`, JSON.stringify(result, null, 2), 'application/json')}>결과 긴급 백업</button></div>}
       {['saved', 'invalid'].includes(status) && <button onClick={reset}>다음 참가자 / 다시 시작</button>}
       {active && <button onClick={() => { transition('invalid'); setMessage('이번 시도를 중단했습니다. 완료 기록은 생성되지 않았습니다.'); }}>이번 시도 중단</button>}
-      <p><Link to="/typing/results">이 기기의 참가 기록 보기 →</Link></p>
+      <p><Link to="/typing/results">운영진 기록·순위 관리 →</Link></p>
     </section>
     {blocked.state === 'blocked' && <div className="notice" role="alert"><p>페이지를 떠나면 진행 중인 시도나 저장하지 못한 결과를 잃을 수 있습니다.</p><div className="actions"><button onClick={() => blocked.reset()}>계속 진행</button><button onClick={() => blocked.proceed()}>페이지 떠나기</button></div></div>}
   </>;

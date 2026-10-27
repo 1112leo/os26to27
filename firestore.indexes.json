@@ -1,0 +1,8 @@
+{
+  "indexes": [],
+  "fieldOverrides": [
+    { "collectionGroup": "letters", "fieldPath": "content", "indexes": [] },
+    { "collectionGroup": "letters", "fieldPath": "published_content", "indexes": [] },
+    { "collectionGroup": "receipts", "fieldPath": "payload_hash", "indexes": [] }
+  ]
+}

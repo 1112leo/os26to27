@@ -1,6 +1,6 @@
 import 'fake-indexeddb/auto';
 import { describe, expect, it } from 'vitest';
-import { listResults, resultsCsv, saveResult } from '../src/typing/storage';
+import { listResults, resultsCsv, saveResult } from '../src/typing/local-storage';
 import type { TypingResult } from '../src/shared/types';
 
 describe('IndexedDB와 CSV', () => {

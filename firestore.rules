@@ -1,0 +1,131 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function signedIn() { return request.auth != null; }
+    function admin() {
+      return signedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid))
+        && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.enabled == true;
+    }
+    function uuid(value) { return value is string && value.matches('[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}'); }
+    function eventOpen() { return get(/databases/$(database)/documents/settings/event).data.phase == 'A'; }
+    function newReceipt(id, kind) {
+      let receipt = getAfter(/databases/$(database)/documents/receipts/$(id)).data;
+      return receipt.id == id && receipt.kind == kind && receipt.owner_uid == request.auth.uid && receipt.created_at == request.time;
+    }
+    function freshRate(id, kind) {
+      let rate = getAfter(/databases/$(database)/documents/rateLimits/$(request.auth.uid)).data;
+      return rate.last_event_id == id && rate.kind == kind && rate.last_write_at == request.time;
+    }
+    function text(value, minimum, maximum) {
+      // RE2 counts Unicode code points, matching the form's Array.from counter.
+      return value is string && value.matches('(?s).{' + string(minimum) + ',' + string(maximum) + '}')
+        && value.trim() == value;
+    }
+
+    match /admins/{uid} {
+      allow get: if signedIn() && request.auth.uid == uid;
+      allow list, write: if false;
+    }
+    match /settings/event {
+      allow read: if true;
+      allow create, update: if admin() && request.resource.data.keys().hasOnly(['phase', 'updated_at'])
+        && request.resource.data.phase in ['A', 'B', 'C'] && request.resource.data.updated_at == request.time;
+      allow delete: if false;
+    }
+    match /challenges/{id} {
+      allow read: if true;
+      allow create, update: if admin() && request.resource.data.keys().hasOnly(['text', 'referenceKeystrokes', 'practice', 'enabled'])
+        && request.resource.data.text is string && request.resource.data.text.size() > 0 && request.resource.data.text.size() <= 1000
+        && request.resource.data.referenceKeystrokes is int && request.resource.data.referenceKeystrokes > 0
+        && request.resource.data.referenceKeystrokes <= 5000 && request.resource.data.practice is bool && request.resource.data.enabled is bool;
+      allow delete: if false;
+    }
+    match /rateLimits/{uid} {
+      function shape() {
+        let data = request.resource.data;
+        return signedIn() && uid == request.auth.uid && data.keys().hasOnly(['window_start', 'count', 'last_write_at', 'last_event_id', 'kind'])
+          && data.count is int && data.count > 0 && data.count <= 600 && data.window_start is timestamp
+          && data.last_write_at == request.time && uuid(data.last_event_id) && data.kind in ['letter', 'typing']
+          && newReceipt(data.last_event_id, data.kind);
+      }
+      allow get: if signedIn() && uid == request.auth.uid;
+      allow create: if shape() && request.resource.data.window_start == request.time && request.resource.data.count == 1;
+      allow update: if shape() && (
+        (request.time - resource.data.window_start >= duration.value(60, 's')
+          && request.resource.data.window_start == request.time && request.resource.data.count == 1)
+        || (request.time - resource.data.window_start < duration.value(60, 's')
+          && request.resource.data.window_start == resource.data.window_start && request.resource.data.count == resource.data.count + 1)
+      );
+      allow list, delete: if false;
+    }
+    match /receipts/{id} {
+      function targetExists(data) {
+        return data.kind == 'letter'
+          ? getAfter(/databases/$(database)/documents/letters/$(id)).data.created_at == request.time
+            && getAfter(/databases/$(database)/documents/letters/$(id)).data.owner_uid == request.auth.uid
+          : getAfter(/databases/$(database)/documents/typingResults/$(id)).data.received_at == request.time
+            && getAfter(/databases/$(database)/documents/typingResults/$(id)).data.owner_uid == request.auth.uid;
+      }
+      // Receipts contain only receipt metadata, never a student's original text or name.
+      allow get: if signedIn() && (!exists(/databases/$(database)/documents/receipts/$(id)) || resource.data.owner_uid == request.auth.uid || admin());
+      allow create: if signedIn() && uuid(id) && request.resource.data.keys().hasOnly(['id', 'owner_uid', 'kind', 'payload_hash', 'created_at'])
+        && request.resource.data.id == id && request.resource.data.owner_uid == request.auth.uid
+        && request.resource.data.kind in ['letter', 'typing'] && request.resource.data.created_at == request.time
+        && request.resource.data.payload_hash is string && request.resource.data.payload_hash.matches('[0-9a-f]{64}')
+        && targetExists(request.resource.data) && freshRate(id, request.resource.data.kind);
+      allow list: if admin();
+      allow update, delete: if false;
+    }
+    match /letters/{id} {
+      function valid(data) {
+        return data.keys().hasOnly(['id', 'owner_uid', 'nickname', 'content', 'published_content', 'consent_to_publish', 'status', 'publish_order', 'submission_key', 'created_at', 'reviewed_at'])
+          && data.id == id && uuid(id) && text(data.content, 10, 700)
+          && (data.nickname == null || (text(data.nickname, 1, 30) && !data.nickname.matches('(?s).*\\n.*')))
+          && data.consent_to_publish == 1 && data.submission_key == id
+          && data.status in ['pending', 'approved', 'rejected']
+          && (data.published_content == null || text(data.published_content, 1, 700))
+          && (data.publish_order == null || (data.publish_order is int && data.publish_order >= 0 && data.publish_order <= 1000000));
+      }
+      allow read: if admin();
+      allow create: if signedIn() && eventOpen() && valid(request.resource.data)
+        && request.resource.data.owner_uid == request.auth.uid && request.resource.data.created_at == request.time
+        && request.resource.data.status == 'pending' && request.resource.data.published_content == null
+        && request.resource.data.publish_order == null && request.resource.data.reviewed_at == null && newReceipt(id, 'letter');
+      allow update: if admin() && valid(request.resource.data)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status', 'published_content', 'publish_order', 'reviewed_at'])
+        && request.resource.data.reviewed_at == request.time;
+      allow delete: if false;
+    }
+    match /typingResults/{id} {
+      function validScore(data) {
+        let challenge = get(/databases/$(database)/documents/challenges/$(data.challengeId)).data;
+        // Force floating division even when elapsedMs was stored as an integer.
+        let calculated = challenge.referenceKeystrokes * 60000.0 / data.elapsedMs;
+        let rawScore = data.speed - data.errors * 20;
+        return challenge.enabled == true && challenge.practice == data.practice
+          && data.speed is int && data.speed >= 0 && data.speed - 0.5 <= calculated && calculated < data.speed + 0.5
+          && data.errors is int && data.errors >= 0 && data.errors <= 10000
+          && data.score is int && data.score == (rawScore > 0 ? rawScore : 0);
+      }
+      allow read: if admin();
+      // Operators may recover queued booth records after the public event closes.
+      allow create: if signedIn() && (eventOpen() || admin()) && uuid(id)
+        && request.resource.data.keys().hasOnly(['id', 'owner_uid', 'participantId', 'displayName', 'challengeId', 'elapsedMs', 'speed', 'errors', 'score', 'completedAt', 'prizeReceived', 'practice', 'verificationStatus', 'received_at', 'reviewed_at'])
+        && request.resource.data.id == id && request.resource.data.owner_uid == request.auth.uid
+        && text(request.resource.data.participantId, 1, 30) && text(request.resource.data.displayName, 1, 30)
+        && request.resource.data.challengeId is string && request.resource.data.challengeId.size() <= 100
+        && request.resource.data.elapsedMs is number && request.resource.data.elapsedMs > 0 && request.resource.data.elapsedMs <= 3600000
+        && request.resource.data.completedAt is string && request.resource.data.completedAt.size() <= 30
+        && request.resource.data.prizeReceived == false && request.resource.data.practice is bool
+        && request.resource.data.verificationStatus == 'pending' && request.resource.data.received_at == request.time
+        && request.resource.data.reviewed_at == null && validScore(request.resource.data) && newReceipt(id, 'typing');
+      allow update: if admin()
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['prizeReceived', 'verificationStatus', 'reviewed_at'])
+        && request.resource.data.prizeReceived is bool && request.resource.data.verificationStatus in ['pending', 'verified', 'rejected']
+        && (!request.resource.data.prizeReceived || (!resource.data.practice && request.resource.data.verificationStatus == 'verified'))
+        && request.resource.data.reviewed_at == request.time;
+      allow delete: if false;
+    }
+    match /{document=**} { allow read, write: if false; }
+  }
+}

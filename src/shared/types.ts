@@ -5,6 +5,7 @@ export interface EventConfig {
   phase: EventPhase;
   typingEnabled: boolean;
   submissionsEnabled: boolean;
+  backend?: 'firebase';
 }
 
 export interface LetterSubmission {
@@ -52,4 +53,13 @@ export interface TypingResult {
   completedAt: string;
   prizeReceived: boolean;
   practice: boolean;
+  verificationStatus?: 'pending' | 'verified' | 'rejected';
+  receivedAt?: string;
+  reviewedAt?: string | null;
+}
+
+export type SyncState = 'pending' | 'synced';
+export interface LocalTypingResult extends TypingResult {
+  syncState?: SyncState;
+  syncError?: string;
 }
