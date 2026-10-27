@@ -1,0 +1,565 @@
+import { makePublicData, toCsv } from './common.js';
+import {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  limit,
+  orderBy,
+  query,
+  runTransaction,
+  serverTimestamp,
+  startAfter,
+  Timestamp,
+  updateDoc,
+  writeBatch,
+  setDoc,
+  deleteDoc,
+} from 'https://www.gstatic.com/firebasejs/13.1.0/firebase-firestore.js';
+import { normalizeText, unicodeLength, UUID_PATTERN, validateSubmission } from './common.js';
+import { calculateScore, countKeystrokes } from './typing/scoring.js';
+import { CHALLENGE } from './typing/challenge.js';
+import { ClientError, withDeadline, adminContext } from './firebase.js';
+export const RATE_LIMIT = 600;
+export const PAGE_SIZE = 100;
+export async function payloadHash(payload) {
+  const bytes = await crypto.subtle.digest(
+    'SHA-256',
+    new TextEncoder().encode(JSON.stringify(payload)),
+  );
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+async function createOnce(db, uid, id, kind, payload) {
+  const hash = await payloadHash(payload);
+  return withDeadline(
+    runTransaction(db, async (tx) => {
+      const receiptRef = doc(db, 'receipts', id);
+      const receipt = await tx.get(receiptRef);
+      if (receipt.exists()) {
+        if (receipt.data().payload_hash !== hash || receipt.data().kind !== kind)
+          throw new ClientError(
+            '동일 접수번호에 다른 내용이 연결되어 있습니다. 원래 내용으로 재시도해 주세요.',
+            409,
+            'KEY_CONFLICT',
+          );
+        return {
+          id,
+          replayed: true,
+        };
+      }
+      const rateRef = doc(db, 'rateLimits', uid);
+      const rate = await tx.get(rateRef);
+      const previous = rate.data();
+      const currentWindow =
+        previous?.window_start instanceof Timestamp &&
+        Date.now() - previous.window_start.toMillis() < 60000;
+      if (currentWindow && Number(previous?.count) >= RATE_LIMIT)
+        throw new ClientError(
+          '이 기기의 제출 요청이 많습니다. 1분 후 다시 시도해 주세요.',
+          429,
+          'RATE_LIMITED',
+        );
+      tx.set(rateRef, {
+        window_start: currentWindow ? previous.window_start : serverTimestamp(),
+        count: currentWindow ? Number(previous.count) + 1 : 1,
+        last_write_at: serverTimestamp(),
+        last_event_id: id,
+        kind,
+      });
+      tx.set(receiptRef, {
+        id,
+        owner_uid: uid,
+        kind,
+        payload_hash: hash,
+        created_at: serverTimestamp(),
+      });
+      tx.set(doc(db, kind === 'letter' ? 'letters' : 'typingResults', id), {
+        ...payload,
+        owner_uid: uid,
+        [kind === 'letter' ? 'created_at' : 'received_at']: serverTimestamp(),
+      });
+      return {
+        id,
+        replayed: false,
+      };
+    }),
+  );
+}
+export async function submitLetter(db, uid, input) {
+  const { value, error } = validateSubmission(input);
+  if (!value) throw new ClientError(error, 400, 'VALIDATION_FAILED');
+  const payload = {
+    id: value.submissionKey,
+    nickname: value.nickname || null,
+    content: value.content,
+    published_content: null,
+    consent_to_publish: 1,
+    status: 'pending',
+    publish_order: null,
+    submission_key: value.submissionKey,
+    reviewed_at: null,
+  };
+  return createOnce(db, uid, value.submissionKey, 'letter', payload);
+}
+export function validateTypingResult(input, challenge = CHALLENGE) {
+  if (
+    !UUID_PATTERN.test(input.id) ||
+    !normalizeText(input.participantId) ||
+    !normalizeText(input.displayName) ||
+    unicodeLength(input.participantId) > 30 ||
+    unicodeLength(input.displayName) > 30 ||
+    input.challengeId !== challenge.challengeId ||
+    input.practice !== challenge.practice ||
+    input.prizeReceived ||
+    !Number.isFinite(Date.parse(input.completedAt)) ||
+    input.elapsedMs > 3600000
+  )
+    throw new ClientError('타자 기록의 형식을 확인해 주세요.', 400, 'INVALID_RESULT');
+  const computed = calculateScore(challenge.referenceKeystrokes, input.elapsedMs, input.errors);
+  if (input.speed !== computed.speed || input.score !== computed.score)
+    throw new ClientError('타수와 최종 점수 계산이 일치하지 않습니다.', 400, 'INVALID_SCORE');
+}
+export async function submitTyping(db, uid, result) {
+  validateTypingResult(result, await readChallenge(db, result.challengeId));
+  const payload = {
+    id: result.id,
+    participantId: normalizeText(result.participantId),
+    displayName: normalizeText(result.displayName),
+    challengeId: result.challengeId,
+    elapsedMs: result.elapsedMs,
+    speed: result.speed,
+    errors: result.errors,
+    score: result.score,
+    completedAt: result.completedAt,
+    prizeReceived: false,
+    practice: result.practice,
+    verificationStatus: 'pending',
+    reviewed_at: null,
+  };
+  return createOnce(db, uid, result.id, 'typing', payload);
+}
+export const dateString = (value) =>
+  value instanceof Timestamp
+    ? value.toDate().toISOString()
+    : typeof value === 'string'
+      ? value
+      : '';
+export async function allDocuments(db, name) {
+  const documents = [];
+  let cursor;
+  while (true) {
+    const page = await withDeadline(
+      getDocs(
+        query(
+          collection(db, name),
+          orderBy('__name__'),
+          ...(cursor ? [startAfter(cursor)] : []),
+          limit(PAGE_SIZE),
+        ),
+      ),
+    );
+    documents.push(...page.docs);
+    if (page.docs.length < PAGE_SIZE) return documents;
+    cursor = page.docs.at(-1);
+  }
+}
+export async function readLetters(db) {
+  return (await allDocuments(db, 'letters')).map(decodeLetter);
+}
+function decodeLetter(snapshot) {
+  const data = snapshot.data();
+  return {
+    id: snapshot.id,
+    nickname: data.nickname,
+    content: data.content,
+    published_content: data.published_content,
+    consent_to_publish: data.consent_to_publish,
+    status: data.status,
+    publish_order: data.publish_order,
+    submission_key: data.submission_key,
+    created_at: dateString(data.created_at),
+    reviewed_at: data.reviewed_at ? dateString(data.reviewed_at) : null,
+  };
+}
+export async function readTyping(db) {
+  return (await allDocuments(db, 'typingResults')).map((snapshot) => {
+    const data = snapshot.data();
+    return {
+      id: snapshot.id,
+      participantId: data.participantId,
+      displayName: data.displayName,
+      challengeId: data.challengeId,
+      elapsedMs: data.elapsedMs,
+      speed: data.speed,
+      errors: data.errors,
+      score: data.score,
+      completedAt: data.completedAt,
+      practice: data.practice,
+      prizeReceived: data.prizeReceived,
+      verificationStatus: data.verificationStatus,
+      receivedAt: dateString(data.received_at),
+      reviewedAt: data.reviewed_at ? dateString(data.reviewed_at) : null,
+    };
+  });
+}
+function letterEdit(input) {
+  const { value, error } = validateSubmission({
+    nickname: input.nickname ?? '',
+    content: input.content,
+    consentToPublish: true,
+    submissionKey: crypto.randomUUID(),
+  });
+  if (!value) throw new ClientError(error, 400);
+  const published = input.published_content ? normalizeText(input.published_content) || null : null;
+  if (published && unicodeLength(published) > 700)
+    throw new ClientError('공개용 본문은 700자 이내입니다.', 400);
+  if (
+    !['pending', 'approved', 'rejected'].includes(input.status) ||
+    (input.publish_order !== null &&
+      (!Number.isInteger(input.publish_order) ||
+        input.publish_order < 0 ||
+        input.publish_order > 1000000))
+  )
+    throw new ClientError('검수 상태와 공개 순서를 확인해 주세요.', 400);
+  return {
+    nickname: value.nickname || null,
+    content: value.content,
+    published_content: published,
+    status: input.status,
+    publish_order: input.publish_order,
+  };
+}
+function publicLetter(id, data) {
+  return {
+    id,
+    nickname: data.nickname || '익명',
+    content: data.published_content || data.content,
+    order: data.publish_order,
+    sort_order: data.publish_order ?? 1000001,
+  };
+}
+export async function saveLetter(db, uid, id, input) {
+  const data = letterEdit(input);
+  const key = id ?? crypto.randomUUID();
+  if (!UUID_PATTERN.test(key)) throw new ClientError('글 ID가 올바르지 않습니다.', 400);
+  await withDeadline(
+    runTransaction(db, async (tx) => {
+      const ref = doc(db, 'letters', key);
+      const previous = await tx.get(ref);
+      if (id && !previous.exists())
+        throw new ClientError('이미 삭제된 글입니다. 목록을 새로고침해 주세요.', 404);
+      tx.set(
+        ref,
+        previous.exists()
+          ? {
+              ...previous.data(),
+              ...data,
+              reviewed_at: serverTimestamp(),
+            }
+          : {
+              ...data,
+              id: key,
+              owner_uid: uid,
+              submission_key: key,
+              consent_to_publish: 1,
+              created_at: serverTimestamp(),
+              reviewed_at: serverTimestamp(),
+            },
+      );
+      const publicRef = doc(db, 'publicLetters', key);
+      if (data.status === 'approved') tx.set(publicRef, publicLetter(key, data));
+      else tx.delete(publicRef);
+    }),
+  );
+  return decodeLetter(await withDeadline(getDoc(doc(db, 'letters', key))));
+}
+export async function reviewLetter(db, id, patch) {
+  const snapshot = await withDeadline(getDoc(doc(db, 'letters', id)));
+  if (!snapshot.exists()) throw new ClientError('글을 찾을 수 없습니다.', 404);
+  return saveLetter(db, snapshot.data().owner_uid, id, {
+    ...decodeLetter(snapshot),
+    ...patch,
+  });
+}
+export async function deleteLetter(db, id) {
+  const batch = writeBatch(db);
+  batch.delete(doc(db, 'letters', id));
+  batch.delete(doc(db, 'publicLetters', id));
+  await withDeadline(batch.commit());
+}
+export async function synchronizePublicLetters(db) {
+  const letters = await readLetters(db);
+  let count = 0;
+  for (let offset = 0; offset < letters.length; offset += 8) {
+    const batch = writeBatch(db);
+    for (const letter of letters.slice(offset, offset + 8)) {
+      const ref = doc(db, 'publicLetters', letter.id);
+      if (letter.status === 'approved' && letter.consent_to_publish === 1) {
+        batch.set(ref, publicLetter(letter.id, letter));
+        count++;
+      } else batch.delete(ref);
+    }
+    await withDeadline(batch.commit());
+  }
+  return count;
+}
+export async function readPublicLetters(db, cursor) {
+  const page = await withDeadline(
+    getDocs(
+      query(
+        collection(db, 'publicLetters'),
+        orderBy('sort_order'),
+        orderBy('__name__'),
+        ...(cursor ? [startAfter(cursor)] : []),
+        limit(21),
+      ),
+    ),
+  );
+  return {
+    letters: page.docs.slice(0, 20).map((snapshot) => {
+      const data = snapshot.data();
+      return {
+        id: snapshot.id,
+        nickname: data.nickname,
+        content: data.content,
+        order: data.order,
+      };
+    }),
+    cursor: page.docs[19],
+    hasNext: page.docs.length > 20,
+  };
+}
+export async function reviewTyping(db, id, patch) {
+  if (!UUID_PATTERN.test(id)) throw new ClientError('기록 ID가 올바르지 않습니다.', 400);
+  await withDeadline(
+    updateDoc(doc(db, 'typingResults', id), {
+      ...patch,
+      reviewed_at: serverTimestamp(),
+    }),
+  );
+}
+export async function readEvent(db) {
+  const snapshot = await withDeadline(getDoc(doc(db, 'settings', 'event')));
+  const phase = snapshot.data()?.phase;
+  if (!['A', 'B', 'C'].includes(phase))
+    throw new ClientError(
+      'Firebase 초기 설정이 필요합니다. 관리자에게 행사 설정과 대회 문구 등록을 요청해 주세요.',
+      503,
+      'SETUP_REQUIRED',
+    );
+  return {
+    phase,
+    typingEnabled: phase === 'A' && snapshot.data()?.typingEnabled !== false,
+    submissionsEnabled: phase === 'A' && snapshot.data()?.submissionsEnabled !== false,
+    welcomeEnabled: snapshot.data()?.welcomeEnabled ?? phase === 'C',
+    activeChallengeId: snapshot.data()?.activeChallengeId || CHALLENGE.challengeId,
+    backend: 'firebase',
+  };
+}
+export async function setEvent(db, phase, options) {
+  await withDeadline(
+    runTransaction(db, async (tx) => {
+      const ref = doc(db, 'challenges', options?.activeChallengeId || CHALLENGE.challengeId);
+      const challenge = await tx.get(ref);
+      if (!challenge.exists()) {
+        if (options?.activeChallengeId && options.activeChallengeId !== CHALLENGE.challengeId)
+          throw new ClientError('사용할 대회 문구를 먼저 등록해 주세요.', 400);
+        tx.set(ref, {
+          text: CHALLENGE.text,
+          referenceKeystrokes: CHALLENGE.referenceKeystrokes,
+          practice: true,
+          enabled: true,
+        });
+      } else if (challenge.data().enabled !== true || challenge.data().deleted === true) {
+        throw new ClientError('사용할 문구의 접수를 먼저 켜 주세요.', 400);
+      }
+      tx.set(doc(db, 'settings', 'event'), {
+        phase,
+        ...(options ?? {}),
+        updated_at: serverTimestamp(),
+      });
+    }),
+  );
+}
+export async function readChallenge(db, id) {
+  if (!/^[a-zA-Z0-9_-]{1,100}$/.test(id))
+    throw new ClientError('문구 ID가 올바르지 않습니다.', 400);
+  const snapshot = await withDeadline(getDoc(doc(db, 'challenges', id)));
+  if (!snapshot.exists())
+    throw new ClientError('대회 문구를 찾을 수 없습니다. 문구 설정을 확인해 주세요.', 400);
+  const data = snapshot.data();
+  return {
+    challengeId: id,
+    title: data.title || (id === CHALLENGE.challengeId ? CHALLENGE.title : id),
+    text: data.text,
+    referenceKeystrokes: data.referenceKeystrokes,
+    practice: data.practice,
+    enabled: data.enabled,
+    deleted: data.deleted === true,
+  };
+}
+export async function readChallenges(db) {
+  return (await allDocuments(db, 'challenges')).map((snapshot) => {
+    const data = snapshot.data();
+    return {
+      challengeId: snapshot.id,
+      title: data.title || (snapshot.id === CHALLENGE.challengeId ? CHALLENGE.title : snapshot.id),
+      text: data.text,
+      referenceKeystrokes: data.referenceKeystrokes,
+      practice: data.practice,
+      enabled: data.enabled,
+      deleted: data.deleted === true,
+    };
+  });
+}
+export async function saveChallenge(db, input, previous) {
+  const title = normalizeText(input.title);
+  const text = normalizeText(input.text).replace(/\s+/g, ' ');
+  if (!title || unicodeLength(title) > 80 || !text || unicodeLength(text) > 1000)
+    throw new ClientError('제목은 1~80자, 문구는 1~1,000자로 입력해 주세요.', 400);
+  const id =
+    previous && previous.text === text && previous.practice === input.practice
+      ? previous.challengeId
+      : crypto.randomUUID();
+  await withDeadline(
+    setDoc(doc(db, 'challenges', id), {
+      title,
+      text,
+      practice: input.practice,
+      referenceKeystrokes: countKeystrokes(text),
+      enabled: previous?.enabled ?? true,
+      deleted: false,
+    }),
+  );
+  return id;
+}
+export async function changeChallenge(db, id, patch) {
+  await withDeadline(updateDoc(doc(db, 'challenges', id), patch));
+}
+export async function saveTyping(db, uid, id, input) {
+  const challenge = await readChallenge(db, input.challengeId);
+  const computed = calculateScore(challenge.referenceKeystrokes, input.elapsedMs, input.errors);
+  const data = {
+    ...input,
+    ...computed,
+    participantId: normalizeText(input.participantId),
+    displayName: normalizeText(input.displayName),
+    practice: challenge.practice,
+    verificationStatus: input.verificationStatus ?? 'pending',
+  };
+  if (
+    !data.participantId ||
+    !data.displayName ||
+    unicodeLength(data.participantId) > 30 ||
+    unicodeLength(data.displayName) > 30 ||
+    input.elapsedMs > 3600000 ||
+    input.errors > 10000 ||
+    (input.prizeReceived && (challenge.practice || data.verificationStatus !== 'verified'))
+  )
+    throw new ClientError('참가 정보·시간·오타와 상품 수령 조건을 확인해 주세요.', 400);
+  const key = id ?? crypto.randomUUID();
+  if (!UUID_PATTERN.test(key)) throw new ClientError('기록 ID가 올바르지 않습니다.', 400);
+  const ref = doc(db, 'typingResults', key);
+  if (id)
+    await withDeadline(
+      updateDoc(ref, {
+        ...data,
+        reviewed_at: serverTimestamp(),
+      }),
+    );
+  else
+    await withDeadline(
+      setDoc(ref, {
+        ...data,
+        id: key,
+        owner_uid: uid,
+        completedAt: new Date().toISOString(),
+        received_at: serverTimestamp(),
+        reviewed_at: serverTimestamp(),
+      }),
+    );
+  return key;
+}
+export async function deleteTyping(db, id) {
+  await withDeadline(deleteDoc(doc(db, 'typingResults', id)));
+}
+export function encodeFirestore(value) {
+  if (value instanceof Timestamp)
+    return {
+      __firestoreTimestamp: true,
+      seconds: value.seconds,
+      nanoseconds: value.nanoseconds,
+    };
+  if (Array.isArray(value)) return value.map(encodeFirestore);
+  if (value && typeof value === 'object')
+    return Object.fromEntries(
+      Object.entries(value).map(([key, item]) => [key, encodeFirestore(item)]),
+    );
+  return value;
+}
+export async function createPrivateBackup(db) {
+  const collections = {};
+  for (const name of ['letters', 'typingResults', 'receipts', 'challenges', 'publicLetters']) {
+    collections[name] = (await allDocuments(db, name)).map((snapshot) => ({
+      id: snapshot.id,
+      data: encodeFirestore(snapshot.data()),
+    }));
+  }
+  const event = await withDeadline(getDoc(doc(db, 'settings', 'event')));
+  collections.settings = event.exists()
+    ? [
+        {
+          id: event.id,
+          data: encodeFirestore(event.data()),
+        },
+      ]
+    : [];
+  return {
+    schemaVersion: 2,
+    backend: 'firebase',
+    projectId: db.app.options.projectId,
+    exportedAt: new Date().toISOString(),
+    collections,
+  };
+}
+export async function exportFirebase(scope, format) {
+  const { db } = await adminContext();
+  let content;
+  if (scope === 'public') content = JSON.stringify(makePublicData(await readLetters(db)), null, 2);
+  else if (format === 'csv') {
+    const letters = await readLetters(db);
+    content = toCsv([
+      [
+        'ID',
+        '별명',
+        '원문',
+        '공개용 본문',
+        '공개 동의',
+        '검수 상태',
+        '공개 순서',
+        '접수 키',
+        '작성 시각(UTC)',
+        '검수 시각(UTC)',
+      ],
+      ...letters.map((letter) => [
+        letter.id,
+        letter.nickname,
+        letter.content,
+        letter.published_content,
+        letter.consent_to_publish,
+        letter.status,
+        letter.publish_order,
+        letter.submission_key,
+        letter.created_at,
+        letter.reviewed_at,
+      ]),
+    ]);
+  } else {
+    content = JSON.stringify(await createPrivateBackup(db), null, 2);
+  }
+  return {
+    filename: `ohsung-${scope}-${new Date().toISOString().slice(0, 10)}.${format}`,
+    content,
+    mime: format === 'csv' ? 'text/csv;charset=utf-8' : 'application/json',
+  };
+}

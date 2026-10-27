@@ -1,48 +1,30 @@
-# 기본적으로 제외하고, 앱 실행·빌드에 필요한 파일만 허용합니다.
 /*
+!/typing/
+!/typing/**
+!/write/
+!/write/**
+!/welcome/
+!/welcome/**
+!/admin.js
+!/common.js
+!/database.js
+!/firebase.js
+!/style.css
+!/firebase-config.json
+!/firebase.json
+!/firestore.rules
+!/firestore.indexes.json
+!/serve.mjs
+!/404.html
+!/.nojekyll
 !/.gitignore
 !/README.md
-!/index.html
-!/package.json
-!/package-lock.json
-!/tsconfig.json
-!/vite.config.ts
-!/.env.example
 
-# 화면과 공통 로직
-!/src/
-!/src/**
-
-# 공개 자료와 연결 설정 양식만 포함합니다. 실제 연결값은 각 환경에서 준비합니다.
-!/public/
-/public/*
-!/public/firebase-config.example.json
-
-# 데이터 보호 규칙
-!/firebase/
-/firebase/*
-!/firebase/firestore.rules
-!/firebase/firestore.indexes.json
-
-# 직접 URL 접속을 지원하는 필수 빌드 처리
-!/tools/
-/tools/*
-!/tools/build.mjs
-
-# os26to27 개발 미리보기 전용. 실제 저장소로는 옮기지 않습니다.
-!/.github/
-/.github/*
-!/.github/workflows/
-/.github/workflows/*
-!/.github/workflows/pages.yml
-
-# 허용한 폴더 안에서도 테스트·비밀정보·생성물은 제외합니다.
 **/node_modules/
 **/__tests__/
 **/*.test.*
 **/*.spec.*
 **/*.log
 **/.env*
-!/.env.example
 **/service-account*.json
 **/*-adminsdk-*.json
