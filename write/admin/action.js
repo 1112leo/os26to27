@@ -3,6 +3,7 @@ import {
   finishPasswordReset,
   finishEmailAction,
   errorMessage,
+  getClients,
 } from '../../firebase.js';
 
 const params = new URLSearchParams(location.search);
@@ -83,13 +84,16 @@ form.addEventListener('submit', (event) => {
 confirmation.addEventListener('click', () => void complete(() => finishEmailAction(mode, code)));
 
 const importForm = document.querySelector('#import-link');
-importForm.addEventListener('submit', (event) => {
+importForm.addEventListener('submit', async (event) => {
   event.preventDefault();
   try {
     const link = new URL(new FormData(importForm).get('link'));
+    const { adminAuth } = await getClients();
+    const config = adminAuth.app.options;
+    const mailHosts = [config.authDomain, `${config.projectId}.firebaseapp.com`];
     if (
       link.protocol !== 'https:' ||
-      link.hostname !== 'os20th.firebaseapp.com' ||
+      !mailHosts.includes(link.host) ||
       link.pathname !== '/__/auth/action'
     )
       throw new Error('이 프로젝트의 Firebase 메일 링크를 입력하세요.');

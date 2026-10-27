@@ -1,18 +1,4 @@
 {
-  "auth": {
-    "authorizedDomains": [
-      "os20th.firebaseapp.com",
-      "os20th.web.app",
-      "1112leo.github.io",
-      "20th.hacro.kr",
-      "localhost",
-      "127.0.0.1"
-    ],
-    "providers": {
-      "anonymous": true,
-      "emailPassword": true
-    }
-  },
   "firestore": {
     "rules": "firestore.rules",
     "indexes": "firestore.indexes.json"
