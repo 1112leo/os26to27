@@ -54,8 +54,8 @@ export function resultsCsv(results) {
   return toCsv([
     [
       '목록 순서',
-      '참가번호',
-      '표시 이름',
+      '학번',
+      '이름',
       '문구 버전',
       '소요 시간(ms)',
       '타수',

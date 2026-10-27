@@ -6,6 +6,7 @@
 !/welcome/
 !/welcome/**
 !/admin.js
+!/login.js
 !/common.js
 !/database.js
 !/firebase.js

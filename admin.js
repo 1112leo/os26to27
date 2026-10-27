@@ -428,7 +428,7 @@ async function recordsView() {
     '';
   $('#view').innerHTML =
     `<div class="actions"><button id="new-result">추가</button><button id="reload">새로고침</button><button id="result-csv">CSV</button><button id="result-json">JSON</button></div>
-    <div id="editor"></div><form id="result-filter" class="toolbar">${field('query', '참가자 검색', resultFilter.query)}
+    <div id="editor"></div><form id="result-filter" class="toolbar">${field('query', '학번·이름 검색', resultFilter.query)}
       ${select(
         'version',
         '문구',
@@ -581,7 +581,7 @@ function resultEditor(result) {
   const creationKey = crypto.randomUUID();
   $('#editor').innerHTML =
     `<form id="result-editor" class="panel"><h2>${result ? '기록 수정' : '기록 추가'}</h2>
-    <div class="form-grid">${field('participantId', '참가번호', result?.participantId, 'text', 'required maxlength="30"')}${field('displayName', '표시 이름', result?.displayName, 'text', 'required maxlength="30"')}</div>
+    <div class="form-grid">${field('participantId', '학번', result?.participantId, 'text', 'required maxlength="30"')}${field('displayName', '이름', result?.displayName, 'text', 'required maxlength="30"')}</div>
     ${select(
       'challengeId',
       '문구',

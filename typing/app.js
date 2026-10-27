@@ -1,6 +1,6 @@
 import { getClients, errorMessage } from '../firebase.js';
 import { readEvent, readChallenge } from '../database.js';
-import { downloadFile, localHref } from '../common.js';
+import { mountLogin } from '../login.js';
 import {
   initialInputState,
   commitInput,
@@ -15,9 +15,7 @@ const elements = Object.fromEntries(
   [
     'event-status',
     'reload',
-    'participant-form',
-    'participant-id',
-    'display-name',
+    'start-form',
     'start',
     'challenge-title',
     'attempt-status',
@@ -30,7 +28,6 @@ const elements = Object.fromEntries(
     'result',
     'stop',
     'retry',
-    'backup',
     'reset',
     'reference-keys',
   ].map((id) => [id, document.getElementById(id)]),
@@ -50,8 +47,6 @@ let result = null;
 let spans = [];
 let timer = null;
 
-document.querySelector('.page-header a').href = localHref('./admin/');
-
 function message(text, isError = false) {
   elements.feedback.textContent = text;
   elements.feedback.classList.toggle('error', isError);
@@ -59,17 +54,14 @@ function message(text, isError = false) {
 
 function updateControls() {
   const active = status === 'armed' || status === 'running';
-  elements['participant-id'].disabled = loading || status !== 'ready';
-  elements['display-name'].disabled = loading || status !== 'ready';
   elements.start.hidden = status !== 'ready';
   elements.start.disabled =
-    loading || !config?.typingEnabled || !challenge?.enabled || challenge.deleted;
+    !participant || loading || !config?.typingEnabled || !challenge?.enabled || challenge.deleted;
   elements.start.textContent = loading ? '확인 중' : '시작';
-  elements['participant-form'].setAttribute('aria-busy', String(loading));
+  elements['start-form'].setAttribute('aria-busy', String(loading));
   elements['typing-input'].disabled = !active;
   elements.stop.hidden = !active;
   elements.retry.hidden = status !== 'failed';
-  elements.backup.hidden = status !== 'failed';
   elements.reset.hidden = !['saved', 'invalid'].includes(status);
   elements['attempt-status'].textContent = {
     ready: '',
@@ -170,9 +162,9 @@ async function persist(record) {
   transition('saving');
   message('기록 저장 중');
   try {
-    const saved = await saveResult(record);
+    await saveResult(record);
     transition('saved');
-    message(saved.backupSaved ? '저장 완료 · 운영진 확인 대기' : '서버 저장 완료 · 기기 백업 실패');
+    message('저장 완료');
   } catch (reason) {
     transition('failed');
     message(errorMessage(reason), true);
@@ -194,7 +186,7 @@ function process(value, endedComposition = false) {
   elapsed = Math.max(1, performance.now() - startedAt);
   result = {
     id: crypto.randomUUID(),
-    participantId: participant.id,
+    participantId: participant.studentId,
     displayName: participant.name,
     challengeId: attempt.challengeId,
     elapsedMs: elapsed,
@@ -217,22 +209,15 @@ function invalidate(reason) {
   message(reason, true);
 }
 
-elements['participant-form'].addEventListener('submit', async (event) => {
+elements['start-form'].addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (loading || status !== 'ready') return;
-  const id = elements['participant-id'].value.normalize('NFC').trim();
-  const name = elements['display-name'].value.normalize('NFC').trim();
-  if (!id || !name || Array.from(id).length > 30 || Array.from(name).length > 30) {
-    message('참가번호와 이름을 각각 1~30자로 입력하세요.', true);
-    return;
-  }
+  if (!participant || loading || status !== 'ready') return;
   try {
     const current = await refresh();
     if (!current.config.typingEnabled || !current.challenge.enabled || current.challenge.deleted) {
       message('현재 접수할 수 없습니다.', true);
       return;
     }
-    participant = { id, name };
     attempt = { ...current.challenge };
     engine = initialInputState();
     startedAt = null;
@@ -294,31 +279,48 @@ elements.stop.addEventListener('click', () =>
 elements.retry.addEventListener('click', () => {
   if (result) void persist(result);
 });
-elements.backup.addEventListener('click', () => {
-  if (result)
-    downloadFile(`typing-${result.id}.json`, JSON.stringify(result, null, 2), 'application/json');
-});
-elements.reset.addEventListener('click', async () => {
+async function resetAttempt(reload = true) {
   attempt = null;
-  participant = null;
   engine = initialInputState();
   startedAt = null;
   result = null;
   elapsed = 0;
   input.value = '';
-  elements['participant-form'].reset();
   elements.elapsed.textContent = '0.0';
   elements.errors.textContent = '0';
   elements.score.textContent = '—';
   elements.result.hidden = true;
   transition('ready');
   message('시작 후 직접 입력하세요.');
-  try {
-    await refresh();
-  } catch {
-    // refresh() retains the retry control and connection error.
+  if (reload) {
+    try {
+      await refresh();
+    } catch {
+      /* 연결 오류와 다시 불러오기 버튼을 유지합니다. */
+    }
+    elements.start.focus();
   }
-  elements['participant-id'].focus();
+}
+elements.reset.addEventListener('click', () => void resetAttempt());
+mountLogin({
+  container: document.querySelector('#login'),
+  adminPath: './admin/',
+  onStudent(student) {
+    participant = student;
+    document.querySelector('#student-view').hidden = false;
+    updateControls();
+    void refresh().catch(() => {});
+  },
+  canLogout() {
+    if (loading || saving) return false;
+    if (['armed', 'running', 'failed'].includes(status))
+      return confirm('진행 중인 기록을 닫고 로그아웃할까요?');
+    return true;
+  },
+  onLogout() {
+    participant = null;
+    document.querySelector('#student-view').hidden = true;
+    void resetAttempt(false);
+  },
 });
-
-void refresh().catch(() => {});
+updateControls();
