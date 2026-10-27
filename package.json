@@ -9,12 +9,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build && node tools/build.mjs",
-    "preview": "vite preview --host 127.0.0.1",
-    "emulators": "npx -y firebase-tools@latest emulators:start --project demo-ohsung --only auth,firestore",
-    "emulators:seed": "node tools/firebase.mjs seed",
-    "firebase:deploy": "npx -y firebase-tools@latest deploy --project os20th --only firestore,auth",
-    "publish": "node tools/publish.mjs import",
-    "restore": "node tools/firebase.mjs"
+    "preview": "vite preview --host 127.0.0.1"
   },
   "dependencies": {
     "firebase": "13.1.0",
@@ -27,7 +22,6 @@
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@vitejs/plugin-react": "6.1.2",
-    "firebase-admin": "14.5.0",
     "typescript": "7.0.2",
     "vite": "8.3.5"
   },

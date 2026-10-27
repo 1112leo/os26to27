@@ -123,8 +123,8 @@ async function initialize(): Promise<FirebaseClients> {
       cache: 'no-store',
       signal: AbortSignal.timeout(10000),
     });
-    config = (await response.json()) as FirebaseOptions;
-    if (!response.ok || !config.apiKey || !config.projectId || !config.appId)
+    config = response.ok ? ((await response.json()) as FirebaseOptions) : {};
+    if (!config.apiKey || !config.projectId || !config.appId)
       throw new ClientError(
         '아직 저장 서버가 연결되지 않았습니다. 운영진에게 알려 주세요.',
         503,
