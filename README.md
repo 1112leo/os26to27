@@ -66,6 +66,8 @@ Cloudflare Pages의 GitHub 연동으로 `main` 푸시를 배포합니다. 빌드
 
 요청 제한용 `ohsung-rate-limiter`도 같은 저장소의 Workers Builds에 연결했습니다. 서버·공통 모듈·테스트·의존성·요청 제한 설정이 `main`에서 바뀌면 검증 후 `npm run deploy:gate`를 자동 실행합니다. Cloudflare가 관리하는 기존 배포 토큰을 참조하며 토큰 값을 저장소나 GitHub Secrets에 복사하지 않습니다. 수동 배포가 필요할 때만 로컬 CLI 인증을 사용합니다.
 
+현재 앱의 Git 자동 배포는 검증 완료했습니다. **보조 Worker의 자동 배포는 기존 빌드 토큰 만료로 교체가 필요합니다.** Cloudflare의 `ohsung-rate-limiter → Settings → Builds → API token`에서 새 토큰을 선택한 뒤 실패한 빌드를 재실행하세요. 현재 프로덕션 Worker에는 600건/분 설정이 이미 배포되어 있으며, 이 토큰 문제는 이후 보조 Worker 변경의 자동 배포에만 영향을 줍니다.
+
 프로덕션 D1은 기존 데이터 보존을 위해 UUID와 물리 이름 `osung-letters`를 유지합니다. 새 데이터베이스로 교체하거나 초기화하지 않습니다. 로컬 IndexedDB의 과거 식별자 `osung-typing`도 기록 보존을 위해 유지합니다. 이 두 저장소 식별자를 제외한 새 코드·다운로드 파일·인증 쿠키 등은 `ohsung` 표기를 사용합니다. 새 주소는 브라우저 저장소가 별개이므로 예전 시험 주소의 타자 기록은 CSV/JSON으로 별도 백업하세요.
 
 브랜치 미리보기는 `os26to27-preview` D1에 격리하고 B 단계로 신규 접수를 차단합니다. 프로덕션 관리자 비밀정보를 미리보기에 복사하지 않습니다. CLI 수동 배포가 필요할 때는 먼저 `wrangler login`을 갱신하세요. 최초 시험 배포 기록은 `docs/verification.md`, 프로덕션 구성은 `docs/production.md`를 참고하세요.
