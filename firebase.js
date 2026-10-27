@@ -19,10 +19,6 @@ import {
   createUserWithEmailAndPassword,
   deleteUser,
   inMemoryPersistence,
-  verifyPasswordResetCode,
-  confirmPasswordReset,
-  checkActionCode,
-  applyActionCode,
 } from 'https://www.gstatic.com/firebasejs/13.1.0/firebase-auth.js';
 import {
   connectFirestoreEmulator,
@@ -292,7 +288,9 @@ export async function resetAdminPassword(email) {
 }
 function emailActionSettings() {
   const base = new URL('../../', location.href);
-  const pages = ['write/admin/', 'typing/admin/'].map((path) => new URL(path, base));
+  const pages = ['write/admin/', 'typing/admin/', 'welcome/admin/'].map(
+    (path) => new URL(path, base),
+  );
   const target = pages.find((page) => page.pathname === location.pathname) ?? pages[0];
   if (!['localhost', '127.0.0.1'].includes(location.hostname)) target.protocol = 'https:';
   if (location.hash === '#account') target.hash = '#account';
@@ -304,32 +302,6 @@ function emailActionSettings() {
   return { url: target.href, handleCodeInApp: false };
 }
 
-const emailOperations = {
-  verifyEmail: 'VERIFY_EMAIL',
-  verifyAndChangeEmail: 'VERIFY_AND_CHANGE_EMAIL',
-  recoverEmail: 'RECOVER_EMAIL',
-};
-export async function inspectEmailAction(mode, code) {
-  const { adminAuth } = await getClients();
-  if (mode === 'resetPassword')
-    return { email: await withDeadline(verifyPasswordResetCode(adminAuth, code)) };
-  if (!Object.hasOwn(emailOperations, mode))
-    throw new ClientError('지원하지 않는 이메일 링크입니다.', 400);
-  const result = await withDeadline(checkActionCode(adminAuth, code));
-  if (result.operation !== emailOperations[mode])
-    throw new ClientError('이메일 링크의 작업 종류가 일치하지 않습니다.', 400);
-  return { email: result.data.email };
-}
-export async function finishPasswordReset(code, password) {
-  if (password.length < 12) throw new ClientError('새 비밀번호는 12자 이상으로 입력하세요.', 400);
-  await withDeadline(confirmPasswordReset((await getClients()).adminAuth, code, password));
-}
-export async function finishEmailAction(mode, code) {
-  if (!Object.hasOwn(emailOperations, mode))
-    throw new ClientError('지원하지 않는 이메일 링크입니다.', 400);
-  await inspectEmailAction(mode, code);
-  await withDeadline(applyActionCode((await getClients()).adminAuth, code));
-}
 export async function createOperator(email, password) {
   const { db } = await adminContext();
   if (password.length < 12)

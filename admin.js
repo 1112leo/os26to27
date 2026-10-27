@@ -49,6 +49,7 @@ import {
 
 const root = document.querySelector('#admin');
 const feature = document.body.dataset.feature;
+const featureTitle = { typing: '타자 관리', write: '글 관리', welcome: '공개 글 관리' }[feature];
 const firstTab = feature === 'typing' ? 'records' : 'letters';
 const $ = (selector, scope = document) => scope.querySelector(selector);
 const labels = { pending: '검토 대기', approved: '승인', rejected: '제외' };
@@ -62,7 +63,7 @@ let challenges = [];
 let config;
 let letterPage = 1;
 let resultPage = 1;
-let letterFilter = { query: '', status: '', sort: 'desc' };
+let letterFilter = { query: '', status: feature === 'welcome' ? 'approved' : '', sort: 'desc' };
 let resultFilter = { query: '', version: '', verification: 'all' };
 let renderedHash = location.hash;
 const savedForms = new WeakMap();
@@ -180,14 +181,25 @@ function submit(form, work) {
     });
   });
 }
+function managementLinks() {
+  return `<nav class="actions" aria-label="관리 기능">${[
+    ['typing', '타자 관리'],
+    ['write', '글 관리'],
+    ['welcome', '공개 글 관리'],
+  ]
+    .map(
+      ([name, title]) =>
+        `<a href="${html(localHref(`../../${name}/admin/`))}"${name === feature ? ' aria-current="page"' : ''}>${title}</a>`,
+    )
+    .join('')}</nav>`;
+}
 function showLogin(error = '') {
   viewSequence++;
-  root.innerHTML = `<header class="page-header"><h1>관리자 로그인</h1><a href="${html(localHref('../'))}">돌아가기</a></header>
+  root.innerHTML = `<header class="page-header"><h1>관리자 로그인</h1><a href="${html(localHref('../'))}">돌아가기</a></header>${managementLinks()}
     <p id="status" role="status" hidden></p><form class="panel" id="login">
       ${field('email', '이메일', '', 'email', 'required autocomplete="username"')}
       ${field('password', '비밀번호', '', 'password', 'required autocomplete="current-password"')}
-      <div class="actions"><button type="submit">로그인</button><button type="button" id="reset-password">비밀번호 재설정</button></div></form>
-      <p><a href="${html(localHref('../../write/admin/action.html'))}">메일 링크로 비밀번호 설정</a></p>`;
+      <div class="actions"><button type="submit">로그인</button><button type="button" id="reset-password">비밀번호 재설정</button></div></form>`;
   if (error) setStatus(error, true);
   submit($('#login'), async (values) => {
     applySession(await loginAdmin(values.email, values.password));
@@ -198,12 +210,12 @@ function showLogin(error = '') {
       if (!email) throw new Error('이메일을 입력하세요.');
       await resetAdminPassword(email);
       setStatus(
-        '등록된 이메일이면 재설정 메일이 전송됩니다. 메일 링크가 열리지 않으면 아래 ‘메일 링크로 비밀번호 설정’에서 링크 주소를 입력하세요.',
+        '등록된 이메일이면 재설정 메일이 전송됩니다. 메일의 링크에서 새 비밀번호를 설정하세요.',
       );
     });
 }
 function showAdmin() {
-  root.innerHTML = `<header class="page-header"><h1>${feature === 'typing' ? '타자 관리' : '글 관리'}</h1><a href="${html(localHref('../'))}">돌아가기</a></header>
+  root.innerHTML = `<header class="page-header"><h1>${featureTitle}</h1><a href="${html(localHref('../'))}">돌아가기</a></header>${managementLinks()}
     <div class="section-top"><span id="identity">${html(session.email)}</span><button id="logout">로그아웃</button></div>
     <nav class="admin-nav" aria-label="관리자 메뉴"><a href="#${firstTab}">${feature === 'typing' ? '타자 기록' : '글'}</a><a href="#settings">설정</a><a href="#account">계정</a></nav>
     <p id="status" role="status" hidden></p><div id="view"></div>`;
