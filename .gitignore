@@ -19,6 +19,7 @@
 !/.nojekyll
 !/.gitignore
 !/README.md
+!/CNAME
 
 **/node_modules/
 **/__tests__/

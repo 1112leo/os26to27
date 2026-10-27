@@ -294,6 +294,7 @@ function emailActionSettings() {
   const base = new URL('../../', location.href);
   const pages = ['write/admin/', 'typing/admin/'].map((path) => new URL(path, base));
   const target = pages.find((page) => page.pathname === location.pathname) ?? pages[0];
+  if (!['localhost', '127.0.0.1'].includes(location.hostname)) target.protocol = 'https:';
   if (location.hash === '#account') target.hash = '#account';
   if (
     ['localhost', '127.0.0.1'].includes(location.hostname) &&
