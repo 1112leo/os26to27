@@ -2,7 +2,7 @@
 
 천안오성고 행사 웹사이트의 **GitHub Pages + Firebase 시험 버전**입니다. React·TypeScript·Vite와 Firebase Authentication·Cloud Firestore를 사용합니다. 편지와 타자 결과를 DB에 저장하고 운영진 계정으로 여러 기기의 기록을 함께 관리합니다.
 
-기존 `main`의 Cloudflare 사이트와 D1 데이터는 그대로 유지합니다. 이 버전은 `codex/github-pages-firebase` 브랜치에서 별도로 배포합니다. Firebase 실서비스 연결 전에는 로컬 에뮬레이터로 전 기능을 실행할 수 있습니다. 실제 연결 전 공개 사이트의 제출 기능은 잠겨 있습니다.
+기존 `main`의 Cloudflare 사이트와 D1 데이터는 그대로 유지합니다. 이 버전은 `codex/github-pages-firebase` 브랜치에서 별도로 배포합니다. 실제 Firebase 프로젝트는 **`os20th`**, DB는 **서울(`asia-northeast3`) Standard**이며, 로컬에서는 별도의 `demo-ohsung` 에뮬레이터를 사용합니다.
 
 | 페이지 | 기능 |
 | --- | --- |
@@ -43,15 +43,15 @@ Windows에서 종료한 Java 에뮬레이터가 포트를 계속 잡고 있으�
 
 ## Firebase 실서비스 연결
 
-프로젝트 소유자의 Firebase 로그인 또는 공식 Firebase 플러그인 연결이 필요합니다. 설정은 [docs/firebase.md](docs/firebase.md)를 따릅니다. 서버 키나 서비스 계정은 프런트엔드·GitHub 변수에 넣지 않습니다.
+`os20th` 프로젝트의 익명·이메일/비밀번호 Auth, 승인 도메인, Firestore 규칙·인덱스와 최초 운영진을 구성했습니다. 관리자 계정의 초기 비밀번호는 저장소 밖 로컬 비공개 파일 `C:\Users\castl\.codex\private\os20th-admin.json`에 보관하며 Git에 포함하지 않습니다. 추가 환경을 만들 때는 아래 절차와 [docs/firebase.md](docs/firebase.md)를 따릅니다. 서버 키나 서비스 계정은 프런트엔드·GitHub 변수에 넣지 않습니다.
 
 1. `os26to27`용 Firebase 프로젝트와 웹 앱을 만듭니다. Firestore **Standard / Native mode** DB의 위치는 생성 전에 결정합니다. 학교용 시험 운영은 Spark 요금제로 시작할 수 있으며 이 코드에는 유료 Cloud Functions가 없습니다.
 2. Authentication에서 **익명 로그인**과 **이메일/비밀번호**를 켭니다. 실제 운영진 계정을 별도로 생성합니다. 자동 회원가입·자동 관리자 승격 화면은 제공하지 않습니다.
 3. Firestore에 `admins/관리자UID` 문서를 `{ "enabled": true }`로 등록합니다. 이 작업은 신뢰할 수 있는 콘솔/Admin SDK에서만 가능합니다.
-4. `npx firebase login` 후 `npx firebase use --add`로 실제 프로젝트 별칭을 등록하고 명시적으로 배포합니다.
+4. `npx -y firebase-tools@latest login` 후 실제 프로젝트를 명시적으로 선택·배포합니다. `os20th`는 `production` 별칭으로도 등록되어 있습니다.
 
 ```powershell
-npx firebase deploy --project 실제프로젝트ID --only firestore:rules,firestore:indexes
+npx -y firebase-tools@latest deploy --project 실제프로젝트ID --only firestore,auth
 ```
 
 5. Firebase 웹 앱의 공개 설정 JSON을 `public/firebase-config.json` 또는 GitHub 저장소 **Actions variable `FIREBASE_CONFIG`**에 등록합니다. `apiKey`, `projectId`, `appId`가 필수입니다. 공개 웹 설정 자체는 관리자 비밀키가 아닙니다. GitHub Pages 빌드는 변수 값이 있으면 공개 설정 파일을 생성합니다.
