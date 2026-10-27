@@ -6,6 +6,7 @@ import { CHALLENGE } from '../../src/typing/challenge';
 import { submitLetter, submitTyping, readLetters, reviewLetter, reviewTyping, setEvent } from '../../src/firebase/repository';
 import type { TypingResult } from '../../src/shared/types';
 import { calculateScore } from '../../src/typing/scoring';
+import { createPrivateBackup } from '../../src/firebase/export';
 
 let env: RulesTestEnvironment;
 let guest: Firestore;
@@ -44,6 +45,18 @@ beforeEach(async () => {
 afterAll(async () => { await env?.cleanup(); });
 
 describe('Firebase atomic submission and private data', () => {
+  it('exports private records and the exact event settings document under real rules', async () => {
+    await submitLetter(guest, 'device', letter());
+    await submitTyping(guest, 'device', result());
+    const backup = await createPrivateBackup(operator);
+    expect(backup.schemaVersion).toBe(2);
+    expect(backup.collections.letters).toHaveLength(1);
+    expect(backup.collections.typingResults).toHaveLength(1);
+    expect(backup.collections.receipts).toHaveLength(2);
+    expect(backup.collections.challenges).toHaveLength(1);
+    expect(backup.collections.settings).toEqual([expect.objectContaining({ id: 'event', data: expect.objectContaining({ phase: 'A', updated_at: expect.objectContaining({ __firestoreTimestamp: true }) }) })]);
+    await assertFails(getDocs(collection(operator, 'settings')));
+  });
   it('saves one letter and replays the same receipt without duplication', async () => {
     const input = letter();
     expect((await submitLetter(guest, 'device', input)).replayed).toBe(false);
