@@ -2,7 +2,7 @@ import { adminContext, deviceIdentity, firebaseError } from '../firebase.js';
 import { submitTyping } from '../database.js';
 
 import { toCsv } from '../common.js';
-import { rankResults } from './scoring.js';
+import { rankResults, rankedAttempts } from './scoring.js';
 
 // Legacy storage identifier is intentionally stable so existing local records survive rebranding.
 const DB_NAME = 'osung-typing';
@@ -50,10 +50,11 @@ export async function listLocalResults() {
   }
 }
 
-export function resultsCsv(results) {
+export function resultsCsv(results, { rankedOnly = true } = {}) {
+  const records = rankedOnly ? rankResults(results) : rankedAttempts(results);
   return toCsv([
     [
-      '목록 순서',
+      '순위',
       '학번',
       '이름',
       '문구 버전',
@@ -66,7 +67,7 @@ export function resultsCsv(results) {
       '연습 기록',
       '운영진 확인',
     ],
-    ...rankResults(results).map((r) => [
+    ...records.map((r) => [
       r.rank,
       r.participantId,
       r.displayName,

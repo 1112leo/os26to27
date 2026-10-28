@@ -26,9 +26,7 @@ const elements = Object.fromEntries(
     'typing-input',
     'feedback',
     'result',
-    'stop',
     'retry',
-    'reset',
     'reference-keys',
   ].map((id) => [id, document.getElementById(id)]),
 );
@@ -60,9 +58,7 @@ function updateControls() {
   elements.start.textContent = loading ? '확인 중' : '시작';
   elements['start-form'].setAttribute('aria-busy', String(loading));
   elements['typing-input'].disabled = !active;
-  elements.stop.hidden = !active;
   elements.retry.hidden = status !== 'failed';
-  elements.reset.hidden = !['saved', 'invalid'].includes(status);
   elements['attempt-status'].textContent = {
     ready: '',
     armed: '첫 입력 대기',
@@ -273,13 +269,10 @@ window.addEventListener('beforeunload', (event) => {
 elements.reload.addEventListener('click', () => {
   void refresh().catch(() => {});
 });
-elements.stop.addEventListener('click', () =>
-  invalidate('중단했습니다. 기록은 저장하지 않았습니다.'),
-);
 elements.retry.addEventListener('click', () => {
   if (result) void persist(result);
 });
-async function resetAttempt(reload = true) {
+function clearAttempt() {
   attempt = null;
   engine = initialInputState();
   startedAt = null;
@@ -292,16 +285,7 @@ async function resetAttempt(reload = true) {
   elements.result.hidden = true;
   transition('ready');
   message('시작 후 직접 입력하세요.');
-  if (reload) {
-    try {
-      await refresh();
-    } catch {
-      /* 연결 오류와 다시 불러오기 버튼을 유지합니다. */
-    }
-    elements.start.focus();
-  }
 }
-elements.reset.addEventListener('click', () => void resetAttempt());
 mountLogin({
   container: document.querySelector('#login'),
   adminPath: './admin/',
@@ -320,7 +304,7 @@ mountLogin({
   onLogout() {
     participant = null;
     document.querySelector('#student-view').hidden = true;
-    void resetAttempt(false);
+    clearAttempt();
   },
 });
 updateControls();

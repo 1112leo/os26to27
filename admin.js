@@ -39,7 +39,7 @@ import {
   koreanDate,
   normalizeText,
 } from './common.js';
-import { rankResults, calculateScore, countKeystrokes } from './typing/scoring.js';
+import { rankResults, rankedAttempts, calculateScore, countKeystrokes } from './typing/scoring.js';
 import {
   pendingResults,
   synchronizePending,
@@ -64,7 +64,7 @@ let config;
 let letterPage = 1;
 let resultPage = 1;
 let letterFilter = { query: '', status: feature === 'welcome' ? 'approved' : '', sort: 'desc' };
-let resultFilter = { query: '', version: '', verification: 'all' };
+let resultFilter = { query: '', version: '', verification: 'all', view: 'ranking' };
 let renderedHash = location.hash;
 const savedForms = new WeakMap();
 
@@ -438,7 +438,11 @@ async function recordsView() {
           `${item.title} (${item.practice ? '연습' : '공식'})`,
         ]),
       )}
-      ${select('verification', '확인 상태', resultFilter.verification, [['all', '전체'], ...Object.entries(verification)])}<button>검색</button></form>
+      ${select('verification', '확인 상태', resultFilter.verification, [['all', '전체'], ...Object.entries(verification)])}
+      ${select('view', '보기', resultFilter.view, [
+        ['ranking', '학번별 최고 기록'],
+        ['attempts', '전체 시도'],
+      ])}<button>검색</button></form>
     <div class="table-scroll" id="result-list"></div><div class="actions" id="pagination"></div>
     <details class="panel"><summary>기기 백업</summary><p id="pending-count"></p><div class="actions"><button id="sync-pending">미전송 기록 접수</button><button id="local-json">기기 JSON</button></div></details>`;
   $('#new-result').onclick = () => resultEditor();
@@ -450,7 +454,11 @@ async function recordsView() {
     renderResults();
   };
   $('#result-csv').onclick = () =>
-    downloadFile('typing.csv', resultsCsv(filteredResults()), 'text/csv;charset=utf-8');
+    downloadFile(
+      'typing.csv',
+      resultsCsv(scopedResults(), { rankedOnly: resultFilter.view !== 'attempts' }),
+      'text/csv;charset=utf-8',
+    );
   $('#result-json').onclick = () =>
     downloadFile(
       'typing.json',
@@ -488,15 +496,18 @@ async function pendingCount() {
     element.textContent = '기기 저장소 사용 불가';
   }
 }
-function filteredResults() {
-  return rankResults(
-    results.filter(
-      (item) =>
-        item.challengeId === resultFilter.version &&
-        (resultFilter.verification === 'all' ||
-          item.verificationStatus === resultFilter.verification),
-    ),
+function scopedResults() {
+  return results.filter(
+    (item) =>
+      item.challengeId === resultFilter.version &&
+      (resultFilter.verification === 'all' ||
+        item.verificationStatus === resultFilter.verification),
   );
+}
+function filteredResults() {
+  return resultFilter.view === 'attempts'
+    ? rankedAttempts(scopedResults())
+    : rankResults(scopedResults());
 }
 function renderResults() {
   const ranked = filteredResults();
@@ -507,11 +518,11 @@ function renderResults() {
   );
   resultPage = Math.min(resultPage, Math.max(1, Math.ceil(records.length / 50)));
   $('#result-list').innerHTML =
-    `<table><caption>${records.length}건 · 점수 → 오타 → 시간</caption><thead><tr><th>순위</th><th>참가자</th><th>점수</th><th>타수·오타</th><th>시간</th><th>확인</th><th>상품</th><th>편집</th></tr></thead><tbody>${records
+    `<table><caption>${records.length}건 · ${resultFilter.view === 'attempts' ? '전체 시도' : '학번별 최고 기록'} · 점수 → 오타 → 시간</caption><thead><tr><th>순위</th><th>참가자</th><th>점수</th><th>타수·오타</th><th>시간</th><th>확인</th><th>상품</th><th>편집</th></tr></thead><tbody>${records
       .slice((resultPage - 1) * 50, resultPage * 50)
       .map(
         (item) => `<tr>
-    <td>${item.rank}${item.practice ? ' (연습)' : ''}</td><td>${html(item.displayName)}<small>${html(item.participantId)}</small></td><td>${item.score}</td><td>${item.speed} / ${item.errors}</td><td>${(item.elapsedMs / 1000).toFixed(2)}초</td>
+    <td>${item.rank ?? '—'}${item.practice ? ' (연습)' : ''}</td><td>${html(item.displayName)}<small>${html(item.participantId)}</small></td><td>${item.score}</td><td>${item.speed} / ${item.errors}</td><td>${(item.elapsedMs / 1000).toFixed(2)}초</td>
     <td>${select(`review-${item.id}`, '확인', item.verificationStatus ?? 'pending', Object.entries(verification))}</td>
     <td><button data-prize="${item.id}"${item.practice || item.verificationStatus !== 'verified' ? ' disabled' : ''}>${item.prizeReceived ? '수령' : '미수령'}</button></td>
     <td><button data-edit="${item.id}">수정</button><button class="danger" data-delete="${item.id}">삭제</button></td></tr>`,

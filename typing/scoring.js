@@ -31,14 +31,40 @@ export function compareScores(a, b) {
   return b.score - a.score || a.errors - b.errors || a.elapsedMs - b.elapsedMs;
 }
 
-export function rankResults(results) {
-  const sorted = [...results].sort(
-    (a, b) =>
-      compareScores(a, b) || a.completedAt.localeCompare(b.completedAt) || a.id.localeCompare(b.id),
+function compareAttempts(a, b) {
+  return (
+    compareScores(a, b) || a.completedAt.localeCompare(b.completedAt) || a.id.localeCompare(b.id)
   );
+}
+
+function studentKey(result) {
+  const studentId = String(result.participantId).normalize('NFKC').trim();
+  return JSON.stringify([result.challengeId, result.practice === true, studentId]);
+}
+
+// 기록은 모두 보관하고, 같은 문구·구분에서는 학번별 최고 기록만 순위에 반영합니다.
+export function rankResults(results) {
+  const seen = new Set();
+  const sorted = [...results]
+    .filter((result) => result.verificationStatus !== 'rejected')
+    .sort(compareAttempts)
+    .filter((result) => {
+      const key = studentKey(result);
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
   let rank = 0;
   return sorted.map((result, index) => {
     if (index === 0 || compareScores(result, sorted[index - 1]) !== 0) rank = index + 1;
     return { ...result, rank };
   });
+}
+
+export function rankedAttempts(results) {
+  const ranks = new Map(rankResults(results).map((result) => [result.id, result.rank]));
+  return [...results].sort(compareAttempts).map((result) => ({
+    ...result,
+    rank: ranks.get(result.id) ?? null,
+  }));
 }
