@@ -623,7 +623,7 @@ function resultEditor(result) {
   const creationKey = crypto.randomUUID();
   $('#editor').innerHTML =
     `<form id="result-editor" class="panel"><h2>${result ? '기록 수정' : '기록 추가'}</h2>
-    <div class="form-grid">${field('participantId', '학번', result?.participantId, 'text', 'required maxlength="30"')}${field('displayName', '이름', result?.displayName, 'text', 'required maxlength="30"')}</div>
+    <div class="form-grid">${field('participantId', '입학 ID (기록 식별자)', result?.participantId, 'text', 'required maxlength="30"')}${field('displayName', '이름', result?.displayName, 'text', 'required maxlength="30"')}</div>
     ${select(
       'challengeId',
       '문구',
