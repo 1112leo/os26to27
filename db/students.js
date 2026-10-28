@@ -1,5 +1,5 @@
 import { adminContext, getClients, withDeadline } from './firebase.js';
-import { normalizeText, UUID_PATTERN } from './common.js';
+import { normalizeText, UUID_PATTERN } from '../common.js';
 import {
   collection,
   doc,

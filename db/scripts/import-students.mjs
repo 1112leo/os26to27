@@ -3,7 +3,7 @@ import { createRequire } from 'node:module';
 import { dirname, resolve, relative, isAbsolute, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
-const sourceRoot = fileURLToPath(new URL('../', import.meta.url));
+const sourceRoot = fileURLToPath(new URL('../../', import.meta.url));
 const validId = /^\d{2}1(?:0[1-9]|[1-9]\d)(?:0[1-9]|[1-9]\d)$/;
 const opaqueUid = /^[A-Za-z0-9_-]{20}$/;
 const currentId = /^[1-3](?:0[1-9]|[1-9]\d)(?:0[1-9]|[1-9]\d)$/;
@@ -235,7 +235,7 @@ function argumentsFrom(args) {
   }
   if (!options.input || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(options.project ?? ''))
     throw new Error(
-      'Usage: node scripts/import-students.mjs --input PRIVATE.json --project PROJECT [--dry-run|--apply] [--only ID] [--report PRIVATE.json] [--concurrency 1..10]',
+      'Usage: node db/scripts/import-students.mjs --input PRIVATE.json --project PROJECT [--dry-run|--apply] [--only ID] [--report PRIVATE.json] [--concurrency 1..10]',
     );
   options.concurrency = Number(options.concurrency);
   if (

@@ -1,5 +1,5 @@
-import { studentContext, errorMessage, getClients } from '../firebase.js';
-import { readEvent, submitLetter } from '../database.js';
+import { studentContext, errorMessage, getClients } from '../db/firebase.js';
+import { readEvent, submitLetter } from '../db/database.js';
 import { normalizeText, unicodeLength, validateSubmission } from '../common.js';
 import { mountLogin } from '../login.js';
 

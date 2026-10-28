@@ -236,7 +236,7 @@ async function run() {
     options.concurrency > 10
   )
     throw new Error(
-      'Usage: node scripts/restore-backup.mjs --input PRIVATE.json --project PROJECT [--dry-run|--apply] [--allow-project-change]',
+      'Usage: node db/scripts/restore-backup.mjs --input PRIVATE.json --project PROJECT [--dry-run|--apply] [--allow-project-change]',
     );
   const inputPath = await realpath(resolve(options.input));
   outsideSource(inputPath);

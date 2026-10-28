@@ -172,7 +172,7 @@ function argumentsFrom(args) {
     options.academicYear > 2100
   )
     throw new Error(
-      'Usage: node scripts/link-student-logins.mjs --input PRIVATE.json --project PROJECT --academic-year YEAR [--dry-run|--apply] [--concurrency 1..10]',
+      'Usage: node db/scripts/link-student-logins.mjs --input PRIVATE.json --project PROJECT --academic-year YEAR [--dry-run|--apply] [--concurrency 1..10]',
     );
   if (
     !Number.isInteger(options.concurrency) ||

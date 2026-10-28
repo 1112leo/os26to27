@@ -1,4 +1,4 @@
-import { makePublicData, toCsv } from './common.js';
+import { makePublicData, toCsv } from '../common.js';
 import {
   collection,
   doc,
@@ -17,9 +17,9 @@ import {
   setDoc,
   deleteDoc,
 } from 'https://www.gstatic.com/firebasejs/13.1.0/firebase-firestore.js';
-import { normalizeText, unicodeLength, UUID_PATTERN, validateSubmission } from './common.js';
-import { calculateScore, countKeystrokes } from './typing/scoring.js';
-import { CHALLENGE } from './typing/challenge.js';
+import { normalizeText, unicodeLength, UUID_PATTERN, validateSubmission } from '../common.js';
+import { calculateScore, countKeystrokes } from '../typing/scoring.js';
+import { CHALLENGE } from '../typing/challenge.js';
 import { ClientError, withDeadline, adminContext, STUDENT_UID_PATTERN } from './firebase.js';
 export const RATE_LIMIT = 600;
 export const PAGE_SIZE = 100;

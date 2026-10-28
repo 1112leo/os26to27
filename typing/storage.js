@@ -1,5 +1,5 @@
-import { adminContext, studentContext, firebaseError } from '../firebase.js';
-import { submitTyping, readChallenge, validateTypingResult } from '../database.js';
+import { adminContext, studentContext, firebaseError } from '../db/firebase.js';
+import { submitTyping, readChallenge, validateTypingResult } from '../db/database.js';
 
 import { toCsv } from '../common.js';
 import { rankResults, rankedAttempts } from './scoring.js';

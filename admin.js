@@ -15,7 +15,7 @@ import {
   getDocs,
   serverTimestamp,
   setDoc,
-} from './firebase.js';
+} from './db/firebase.js';
 import {
   readLettersPage,
   reviewLetters,
@@ -36,7 +36,7 @@ import {
   setEvent,
   saveChallenge,
   changeChallenge,
-} from './database.js';
+} from './db/database.js';
 import {
   escapeHtml as html,
   localHref,
@@ -63,7 +63,7 @@ import {
   resetStudentPassword,
   canResetStudentPassword,
   DEFAULT_SESSION_POLICY,
-} from './students.js';
+} from './db/students.js';
 
 const root = document.querySelector('#admin');
 const feature = document.body.dataset.feature;

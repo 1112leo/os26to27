@@ -1,5 +1,5 @@
-import { getClients, errorMessage } from '../firebase.js';
-import { readEvent, readChallenge } from '../database.js';
+import { getClients, errorMessage } from '../db/firebase.js';
+import { readEvent, readChallenge } from '../db/database.js';
 import { mountLogin } from '../login.js';
 import { downloadFile } from '../common.js';
 import {

@@ -6,7 +6,7 @@ import {
   watchStudentSession,
   watchSessionPolicy,
   errorMessage,
-} from './firebase.js';
+} from './db/firebase.js';
 import { escapeHtml as html, localHref } from './common.js';
 
 export function loginKind(value) {

@@ -1,5 +1,5 @@
-import { errorMessage, getPublicDb } from '../firebase.js';
-import { readEvent, readPublicLetters } from '../database.js';
+import { errorMessage, getPublicDb } from '../db/firebase.js';
+import { readEvent, readPublicLetters } from '../db/database.js';
 
 const status = document.querySelector('#status');
 const error = document.querySelector('#error');
