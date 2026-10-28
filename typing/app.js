@@ -15,8 +15,6 @@ const elements = Object.fromEntries(
   [
     'event-status',
     'reload',
-    'start-form',
-    'start',
     'challenge-title',
     'attempt-status',
     'elapsed',
@@ -53,12 +51,7 @@ function message(text, isError = false) {
 
 function updateControls() {
   const active = status === 'armed' || status === 'running';
-  elements.start.hidden = status !== 'ready';
-  elements.start.disabled =
-    !participant || loading || !config?.typingEnabled || !challenge?.enabled || challenge.deleted;
-  elements.start.textContent = loading ? '확인 중' : '시작';
-  elements['start-form'].setAttribute('aria-busy', String(loading));
-  elements['typing-input'].disabled = !active;
+  elements['typing-input'].disabled = !participant || loading || !active;
   elements.retry.hidden = status !== 'failed';
   elements['attempt-status'].textContent = {
     ready: '',
@@ -200,7 +193,7 @@ function process(value, endedComposition = false) {
   };
   elements.elapsed.textContent = (elapsed / 1000).toFixed(2);
   elements.score.textContent = result.score;
-  elements.result.textContent = `${result.speed}타 · 오타 ${result.errors}회 · ${result.score}점`;
+  elements.result.textContent = `${result.speed}타/분 · 오타 ${result.errors}회 · ${result.score}점`;
   elements.result.hidden = false;
   void persist(result);
 }
@@ -211,8 +204,7 @@ function invalidate(reason) {
   message(reason, true);
 }
 
-elements['start-form'].addEventListener('submit', async (event) => {
-  event.preventDefault();
+async function prepareAttempt() {
   if (!participant || loading || status !== 'ready') return;
   const version = sessionVersion;
   try {
@@ -239,7 +231,7 @@ elements['start-form'].addEventListener('submit', async (event) => {
   } catch (reason) {
     message(errorMessage(reason), true);
   }
-});
+}
 
 const input = elements['typing-input'];
 for (const name of ['paste', 'drop'])
@@ -269,13 +261,13 @@ document.addEventListener('visibilitychange', () => {
     invalidate('창 이탈로 중단했습니다. 기록은 저장하지 않았습니다.');
 });
 window.addEventListener('beforeunload', (event) => {
-  if (!['armed', 'running', 'saving', 'failed'].includes(status)) return;
+  if (!['running', 'saving', 'failed'].includes(status)) return;
   event.preventDefault();
   event.returnValue = '';
 });
 
 elements.reload.addEventListener('click', () => {
-  void refresh().catch(() => {});
+  void prepareAttempt();
 });
 elements.retry.addEventListener('click', () => {
   if (result) void persist(result);
@@ -292,7 +284,7 @@ function clearAttempt() {
   elements.score.textContent = '—';
   elements.result.hidden = true;
   transition('ready');
-  message('시작 후 직접 입력하세요.');
+  message('문구를 입력하면 측정이 시작됩니다.');
 }
 mountLogin({
   container: document.querySelector('#login'),
@@ -303,16 +295,16 @@ mountLogin({
     participant = student;
     document.querySelector('#student-view').hidden = false;
     updateControls();
-    if (entering) void refresh().catch(() => {});
+    if (entering) void prepareAttempt();
   },
   canLogout() {
     if (loading || saving) return false;
-    if (['armed', 'running', 'failed'].includes(status))
+    if (['running', 'failed'].includes(status))
       return confirm('진행 중인 기록을 닫고 로그아웃할까요?');
     return true;
   },
   canAutoLogout() {
-    return !loading && !saving && !['armed', 'running'].includes(status);
+    return !loading && !saving && status !== 'running';
   },
   onLogout() {
     sessionVersion++;

@@ -34,7 +34,7 @@ export function mountLogin({
   let setupPromise;
   container.innerHTML = `<section id="login-panel" class="panel login-panel">
     <h2>로그인</h2><form id="entry-form">
-      <label>학번 또는 이메일<input name="identity" required maxlength="254" autocomplete="username" /></label>
+      <label>학번<input name="identity" required maxlength="254" autocomplete="username" /></label>
       <label>비밀번호<input name="credential" type="password" required maxlength="4096" autocomplete="current-password" /></label>
       <p id="login-error" class="error" role="alert" hidden></p>
       <button type="submit">로그인</button>
