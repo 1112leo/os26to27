@@ -7,6 +7,7 @@ import {
   limit,
   orderBy,
   query,
+  where,
   runTransaction,
   serverTimestamp,
   startAfter,
@@ -210,28 +211,181 @@ function decodeLetter(snapshot) {
     submission_key: data.submission_key,
     created_at: dateString(data.created_at),
     reviewed_at: data.reviewed_at ? dateString(data.reviewed_at) : null,
+    last_history_id: data.last_history_id ?? null,
   };
 }
+// A cursor is kept in memory by the administrator view, never persisted or sent as JSON.
+async function matchingPage(db, name, constraints, decode, accept, cursor, pageSize) {
+  const items = [];
+  let position = cursor ?? null;
+  let boundary = null;
+  while (true) {
+    const page = await withDeadline(
+      getDocs(
+        query(
+          collection(db, name),
+          ...constraints,
+          ...(position ? [startAfter(position)] : []),
+          limit(pageSize + 1),
+        ),
+      ),
+    );
+    for (const snapshot of page.docs) {
+      const item = decode(snapshot);
+      position = snapshot;
+      if (!accept(item)) continue;
+      if (items.length === pageSize) return { items, cursor: boundary, hasNext: true };
+      items.push(item);
+      boundary = snapshot;
+    }
+    if (page.docs.length < pageSize + 1) return { items, cursor: boundary, hasNext: false };
+  }
+}
+export async function readLettersPage(
+  db,
+  {
+    status = '',
+    sort = 'desc',
+    query: search = '',
+    cursor = null,
+    pageSize = 20,
+    trash = false,
+  } = {},
+) {
+  const term = normalizeText(search).toLocaleLowerCase();
+  const direction = sort === 'asc' ? 'asc' : 'desc';
+  return matchingPage(
+    db,
+    trash ? 'letterTrash' : 'letters',
+    [
+      ...(status ? [where(trash ? 'letter.status' : 'status', '==', status)] : []),
+      orderBy(trash ? 'trashed_at' : 'created_at', direction),
+      orderBy('__name__', direction),
+    ],
+    (snapshot) => {
+      if (!trash) return decodeLetter(snapshot);
+      const data = snapshot.data();
+      return {
+        ...decodeLetter({ id: snapshot.id, data: () => data.letter }),
+        trashed_at: dateString(data.trashed_at),
+        trashed_by: data.trashed_by,
+      };
+    },
+    (item) =>
+      !term ||
+      `${item.nickname ?? ''} ${item.content} ${item.published_content ?? ''}`
+        .toLocaleLowerCase()
+        .includes(term),
+    cursor,
+    Math.max(1, Math.min(100, pageSize)),
+  );
+}
 export async function readTyping(db) {
-  return (await allDocuments(db, 'typingResults')).map((snapshot) => {
-    const data = snapshot.data();
-    return {
-      id: snapshot.id,
-      participantId: data.participantId,
-      displayName: data.displayName,
-      challengeId: data.challengeId,
-      elapsedMs: data.elapsedMs,
-      speed: data.speed,
-      errors: data.errors,
-      score: data.score,
-      completedAt: data.completedAt,
-      practice: data.practice,
-      prizeReceived: data.prizeReceived,
-      verificationStatus: data.verificationStatus,
-      receivedAt: dateString(data.received_at),
-      reviewedAt: data.reviewed_at ? dateString(data.reviewed_at) : null,
-    };
-  });
+  return (await allDocuments(db, 'typingResults')).map(decodeTyping);
+}
+function decodeTyping(snapshot) {
+  const data = snapshot.data();
+  return {
+    id: snapshot.id,
+    participantId: data.participantId,
+    displayName: data.displayName,
+    challengeId: data.challengeId,
+    elapsedMs: data.elapsedMs,
+    speed: data.speed,
+    errors: data.errors,
+    score: data.score,
+    completedAt: data.completedAt,
+    practice: data.practice,
+    prizeReceived: data.prizeReceived,
+    verificationStatus: data.verificationStatus,
+    receivedAt: dateString(data.received_at),
+    reviewedAt: data.reviewed_at ? dateString(data.reviewed_at) : null,
+  };
+}
+export async function readTypingPage(
+  db,
+  {
+    version,
+    verification = 'all',
+    view = 'ranking',
+    query: search = '',
+    participantIds = [],
+    cursor = null,
+    pageSize = 25,
+  } = {},
+) {
+  if (!version) return { items: [], cursor: null, hasNext: false };
+  const term = normalizeText(search).toLocaleLowerCase();
+  const matchingIds = new Set(participantIds);
+  const ranking = view !== 'attempts';
+  const size = Math.max(1, Math.min(100, pageSize));
+  const constraints = [
+    where('challengeId', '==', version),
+    ...(verification !== 'all' ? [where('verificationStatus', '==', verification)] : []),
+    ...(ranking
+      ? [
+          orderBy('score', 'desc'),
+          orderBy('errors'),
+          orderBy('elapsedMs'),
+          orderBy('completedAt'),
+          orderBy('__name__'),
+        ]
+      : [orderBy('received_at', 'desc'), orderBy('__name__', 'desc')]),
+  ];
+  let position = cursor?.snapshot ?? null;
+  const seen = new Set(cursor?.seen ?? []);
+  let count = cursor?.count ?? 0,
+    rank = cursor?.rank ?? 0,
+    previous = cursor?.previous ?? null;
+  const items = [];
+  let boundary = null;
+  while (true) {
+    const page = await withDeadline(
+      getDocs(
+        query(
+          collection(db, 'typingResults'),
+          ...constraints,
+          ...(position ? [startAfter(position)] : []),
+          limit(size + 1),
+        ),
+      ),
+    );
+    for (const snapshot of page.docs) {
+      position = snapshot;
+      const item = decodeTyping(snapshot);
+      let itemRank = null;
+      if (ranking) {
+        if (item.verificationStatus === 'rejected') continue;
+        const key = JSON.stringify([
+          item.challengeId,
+          item.practice === true,
+          String(item.participantId).normalize('NFKC').trim(),
+        ]);
+        if (seen.has(key)) continue;
+        seen.add(key);
+        count++;
+        if (
+          !previous ||
+          item.score !== previous.score ||
+          item.errors !== previous.errors ||
+          item.elapsedMs !== previous.elapsedMs
+        )
+          rank = count;
+        previous = { score: item.score, errors: item.errors, elapsedMs: item.elapsedMs };
+        itemRank = rank;
+      }
+      if (
+        term &&
+        !matchingIds.has(item.participantId) &&
+        !`${item.participantId} ${item.displayName}`.toLocaleLowerCase().includes(term)
+      )
+        continue;
+      if (items.length === size) return { items, cursor: boundary, hasNext: true };
+      items.push({ ...item, rank: itemRank });
+      boundary = { snapshot, seen: ranking ? [...seen] : [], count, rank, previous };
+    }
+    if (page.docs.length < size + 1) return { items, cursor: boundary, hasNext: false };
+  }
 }
 function letterEdit(input) {
   const { value, error } = validateSubmission({
@@ -271,34 +425,64 @@ function publicLetter(id, data) {
     sort_order: data.publish_order ?? 1000001,
   };
 }
+async function letterOperator(db) {
+  const context = await adminContext();
+  if (context.db !== db)
+    throw new ClientError('관리자 연결이 변경되었습니다. 다시 로그인하세요.', 403);
+  return context.uid;
+}
+function writeLetterLog(tx, db, logId, letterId, operatorUid, action, before, after) {
+  tx.set(doc(db, 'letterLogs', logId), {
+    letter_id: letterId,
+    operator_uid: operatorUid,
+    action,
+    before,
+    after,
+    created_at: serverTimestamp(),
+  });
+}
 // 생성 요청 재시도에는 같은 creationKey를 사용합니다.
 export async function saveLetter(db, uid, id, input, creationKey = crypto.randomUUID()) {
+  const operatorUid = await letterOperator(db);
   const data = letterEdit(input);
   const key = id ?? creationKey;
+  const logId = crypto.randomUUID();
   if (!UUID_PATTERN.test(key)) throw new ClientError('글 ID가 올바르지 않습니다.', 400);
   await withDeadline(
     runTransaction(db, async (tx) => {
       const ref = doc(db, 'letters', key);
       const previous = await tx.get(ref);
+      const trash = await tx.get(doc(db, 'letterTrash', key));
+      if (trash.exists())
+        throw new ClientError('휴지통에 있는 글입니다. 먼저 복원하세요.', 409);
       if (id && !previous.exists())
         throw new ClientError('이미 삭제된 글입니다. 목록을 새로고침해 주세요.', 404);
-      tx.set(
-        ref,
-        previous.exists()
-          ? {
-              ...previous.data(),
-              ...data,
-              reviewed_at: serverTimestamp(),
-            }
-          : {
-              ...data,
-              id: key,
-              owner_uid: uid,
-              submission_key: key,
-              consent_to_publish: 1,
-              created_at: serverTimestamp(),
-              reviewed_at: serverTimestamp(),
-            },
+      const after = previous.exists()
+        ? {
+            ...previous.data(),
+            ...data,
+            reviewed_at: serverTimestamp(),
+          }
+        : {
+            ...data,
+            id: key,
+            owner_uid: uid,
+            submission_key: key,
+            consent_to_publish: 1,
+            created_at: serverTimestamp(),
+            reviewed_at: serverTimestamp(),
+          };
+      after.last_history_id = logId;
+      tx.set(ref, after);
+      writeLetterLog(
+        tx,
+        db,
+        logId,
+        key,
+        operatorUid,
+        previous.exists() ? 'edit' : 'create',
+        previous.exists() ? previous.data() : null,
+        after,
       );
       const publicRef = doc(db, 'publicLetters', key);
       if (data.status === 'approved') tx.set(publicRef, publicLetter(key, data));
@@ -308,18 +492,139 @@ export async function saveLetter(db, uid, id, input, creationKey = crypto.random
   return decodeLetter(await withDeadline(getDoc(doc(db, 'letters', key))));
 }
 export async function reviewLetter(db, id, patch) {
-  const snapshot = await withDeadline(getDoc(doc(db, 'letters', id)));
-  if (!snapshot.exists()) throw new ClientError('글을 찾을 수 없습니다.', 404);
-  return saveLetter(db, snapshot.data().owner_uid, id, {
-    ...decodeLetter(snapshot),
-    ...patch,
-  });
+  if (!UUID_PATTERN.test(id) || !['pending', 'approved', 'rejected'].includes(patch.status))
+    throw new ClientError('글과 검수 상태를 확인하세요.', 400);
+  const operatorUid = await letterOperator(db);
+  const logId = crypto.randomUUID();
+  await withDeadline(
+    runTransaction(db, async (tx) => {
+      const ref = doc(db, 'letters', id);
+      const saved = await tx.get(ref);
+      if (!saved.exists()) throw new ClientError('글을 찾을 수 없습니다.', 404);
+      const before = saved.data();
+      const after = {
+        ...before,
+        status: patch.status,
+        reviewed_at: serverTimestamp(),
+        last_history_id: logId,
+      };
+      tx.set(ref, after);
+      const publicRef = doc(db, 'publicLetters', id);
+      if (after.status === 'approved') tx.set(publicRef, publicLetter(id, after));
+      else tx.delete(publicRef);
+      writeLetterLog(tx, db, logId, id, operatorUid, 'review', before, after);
+    }),
+  );
+  return decodeLetter(await withDeadline(getDoc(doc(db, 'letters', id))));
+}
+export async function reviewLetters(db, ids, status) {
+  if (!Array.isArray(ids) || ids.length > 100)
+    throw new ClientError('한 번에 최대 100건을 선택하세요.', 400);
+  let count = 0;
+  for (const id of new Set(ids)) {
+    try {
+      await reviewLetter(db, id, { status });
+      count++;
+    } catch (error) {
+      throw new ClientError(
+        `${count}건 처리 후 중단되었습니다. ${error.message}`,
+        error.status ?? 500,
+      );
+    }
+  }
+  return count;
 }
 export async function deleteLetter(db, id) {
-  const batch = writeBatch(db);
-  batch.delete(doc(db, 'letters', id));
-  batch.delete(doc(db, 'publicLetters', id));
-  await withDeadline(batch.commit());
+  if (!UUID_PATTERN.test(id)) throw new ClientError('글 ID를 확인하세요.', 400);
+  const uid = await letterOperator(db),
+    logId = crypto.randomUUID();
+  await withDeadline(
+    runTransaction(db, async (tx) => {
+      const ref = doc(db, 'letters', id),
+        trashRef = doc(db, 'letterTrash', id);
+      const [saved, trash] = await Promise.all([tx.get(ref), tx.get(trashRef)]);
+      if (!saved.exists()) {
+        if (trash.exists()) return;
+        throw new ClientError('글을 찾을 수 없습니다.', 404);
+      }
+      if (trash.exists())
+        throw new ClientError('휴지통에 같은 글이 있습니다. 새로고침하세요.', 409);
+      tx.set(trashRef, {
+        letter: saved.data(),
+        trashed_at: serverTimestamp(),
+        trashed_by: uid,
+        last_history_id: logId,
+      });
+      tx.delete(ref);
+      tx.delete(doc(db, 'publicLetters', id));
+      writeLetterLog(tx, db, logId, id, uid, 'trash', saved.data(), null);
+    }),
+  );
+}
+export async function restoreLetter(db, id) {
+  if (!UUID_PATTERN.test(id)) throw new ClientError('글 ID를 확인하세요.', 400);
+  const uid = await letterOperator(db);
+  await withDeadline(
+    runTransaction(db, async (tx) => {
+      const ref = doc(db, 'letters', id),
+        trashRef = doc(db, 'letterTrash', id);
+      const [saved, trash] = await Promise.all([tx.get(ref), tx.get(trashRef)]);
+      if (!trash.exists()) throw new ClientError('휴지통에서 글을 찾을 수 없습니다.', 404);
+      if (saved.exists())
+        throw new ClientError('같은 글이 이미 복원되었습니다. 새로고침하세요.', 409);
+      const before = trash.data().letter,
+        logId = `${trash.data().last_history_id}-restore`;
+      const after = {
+        ...before,
+        status: 'pending',
+        reviewed_at: serverTimestamp(),
+        last_history_id: logId,
+      };
+      tx.set(ref, after);
+      tx.delete(trashRef);
+      tx.delete(doc(db, 'publicLetters', id));
+      writeLetterLog(tx, db, logId, id, uid, 'restore', before, after);
+    }),
+  );
+}
+export async function purgeLetter(db, id) {
+  if (!UUID_PATTERN.test(id)) throw new ClientError('글 ID를 확인하세요.', 400);
+  const uid = await letterOperator(db);
+  await withDeadline(
+    runTransaction(db, async (tx) => {
+      const ref = doc(db, 'letterTrash', id),
+        trash = await tx.get(ref);
+      if (!trash.exists()) throw new ClientError('휴지통에서 글을 찾을 수 없습니다.', 404);
+      const logId = `${trash.data().last_history_id}-purge`;
+      tx.delete(ref);
+      writeLetterLog(tx, db, logId, id, uid, 'purge', trash.data().letter, null);
+    }),
+  );
+}
+export async function readLetterHistory(db, id, { cursor = null, pageSize = 20 } = {}) {
+  if (id !== null && !UUID_PATTERN.test(id)) throw new ClientError('글 ID를 확인하세요.', 400);
+  const size = Math.max(1, Math.min(100, pageSize));
+  const page = await withDeadline(
+    getDocs(
+      query(
+        collection(db, 'letterLogs'),
+        ...(id ? [where('letter_id', '==', id)] : []),
+        orderBy('created_at', 'desc'),
+        orderBy('__name__', 'desc'),
+        ...(cursor ? [startAfter(cursor)] : []),
+        limit(size + 1),
+      ),
+    ),
+  );
+  return {
+    items: page.docs.slice(0, size).map((snapshot) => ({
+      ...snapshot.data(),
+      id: snapshot.id,
+      created_at: dateString(snapshot.data().created_at),
+    })),
+    cursor: page.docs[Math.min(size, page.docs.length) - 1] ?? null,
+    hasNext: page.docs.length > size,
+  };
 }
 export async function synchronizePublicLetters(db) {
   const letters = await readLetters(db);
@@ -546,6 +851,8 @@ export async function createPrivateBackup(db) {
     'publicLetters',
     'students',
     'moderationLogs',
+    'letterTrash',
+    'letterLogs',
   ]) {
     collections[name] = (await allDocuments(db, name)).map((snapshot) => ({
       id: snapshot.id,
@@ -559,7 +866,7 @@ export async function createPrivateBackup(db) {
     .filter((snapshot) => snapshot.exists())
     .map((snapshot) => ({ id: snapshot.id, data: encodeFirestore(snapshot.data()) }));
   return {
-    schemaVersion: 3,
+    schemaVersion: 4,
     includesAuthentication: false,
     backend: 'firebase',
     projectId: db.app.options.projectId,

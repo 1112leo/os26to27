@@ -17,12 +17,17 @@ import {
   setDoc,
 } from './firebase.js';
 import {
-  readLetters,
+  readLettersPage,
+  reviewLetters,
+  restoreLetter,
+  purgeLetter,
+  readLetterHistory,
   saveLetter,
   deleteLetter,
   synchronizePublicLetters,
   exportFirebase,
   readTyping,
+  readTypingPage,
   saveTyping,
   deleteTyping,
   reviewTyping,
@@ -39,12 +44,7 @@ import {
   koreanDate,
   normalizeText,
 } from './common.js';
-import {
-  rankResults,
-  rankedAttempts,
-  calculateScore,
-  countKeystrokes,
-} from './typing/scoring.js';
+import { calculateScore, countKeystrokes } from './typing/scoring.js';
 import {
   pendingResults,
   synchronizePending,
@@ -89,6 +89,13 @@ let pendingStudentDetail = null;
 let config;
 let letterPage = 1;
 let resultPage = 1;
+let letterCursors = [null];
+let resultCursors = [null];
+let letterNext = null;
+let resultNext = null;
+let letterHasNext = false;
+let resultHasNext = false;
+const selectedLetters = new Set();
 let letterFilter = { query: '', status: feature === 'welcome' ? 'approved' : '', sort: 'desc' };
 let resultFilter = { query: '', version: '', verification: 'all', view: 'ranking' };
 let renderedHash = location.hash;
@@ -108,6 +115,21 @@ function clearStudentRoster() {
   studentPage = 1;
   studentDetailSequence++;
   pendingStudentDetail = null;
+  resetLetterPages();
+  resetResultPages();
+}
+function resetLetterPages() {
+  letterPage = 1;
+  letterCursors = [null];
+  letterNext = null;
+  letterHasNext = false;
+  selectedLetters.clear();
+}
+function resetResultPages() {
+  resultPage = 1;
+  resultCursors = [null];
+  resultNext = null;
+  resultHasNext = false;
 }
 function loadStudentRoster(db, force = false) {
   if (force) {
@@ -336,17 +358,46 @@ async function renderTab(forceStudents = false) {
   try {
     const { db } = await adminContext();
     let loaded;
+    if (forceStudents === true) {
+      resetLetterPages();
+      resetResultPages();
+    }
     if (tab === 'letters')
       loaded = await Promise.all([
-        readLetters(db),
+        readLettersPage(db, {
+          ...letterFilter,
+          status: letterFilter.status === 'trash' ? '' : letterFilter.status,
+          trash: letterFilter.status === 'trash',
+          cursor: letterCursors[letterPage - 1],
+        }),
         loadStudentRoster(db, forceStudents === true),
       ]);
-    if (tab === 'records')
-      loaded = await Promise.all([
-        readTyping(db),
+    if (tab === 'records') {
+      const [versions, roster, event] = await Promise.all([
         readChallenges(db),
         loadStudentRoster(db, forceStudents === true),
+        readEvent(db).catch(() => null),
       ]);
+      if (sequence !== viewSequence) return;
+      resultFilter.version ||=
+        event?.activeChallengeId ||
+        versions.find((item) => item.enabled && !item.deleted)?.challengeId ||
+        versions[0]?.challengeId ||
+        '';
+      const queryText = resultFilter.query.trim().toLowerCase();
+      const page = resultFilter.version
+        ? await readTypingPage(db, {
+            ...resultFilter,
+            participantIds: queryText
+              ? roster
+                  .filter((item) => item.login_id?.includes(queryText))
+                  .map((item) => item.student_id)
+              : [],
+            cursor: resultCursors[resultPage - 1],
+          })
+        : { items: [], cursor: null, hasNext: false };
+      loaded = [page, versions, roster];
+    }
     if (tab === 'settings')
       loaded = await Promise.all([
         readEvent(db).catch(() => null),
@@ -360,10 +411,20 @@ async function renderTab(forceStudents = false) {
       ]);
     if (sequence !== viewSequence) return;
     if (tab === 'letters') {
-      [letters, students] = loaded;
+      const [page, roster] = loaded;
+      letters = page.items;
+      students = roster;
+      letterNext = page.cursor;
+      letterHasNext = page.hasNext;
+      selectedLetters.clear();
       lettersView();
     } else if (tab === 'records') {
-      [results, challenges, students] = loaded;
+      const [page, versions, roster] = loaded;
+      results = page.items;
+      challenges = versions;
+      students = roster;
+      resultNext = page.cursor;
+      resultHasNext = page.hasNext;
       await recordsView();
     } else if (tab === 'settings') {
       [config, challenges, sessionPolicy] = loaded;
@@ -407,31 +468,49 @@ window.addEventListener('beforeunload', (event) => {
 });
 
 function lettersView() {
+  const trash = letterFilter.status === 'trash';
   $('#view').innerHTML =
-    `<div class="actions"><button id="new-letter">추가</button><button id="reload">새로고침</button></div>
+    `<div class="actions"><button id="new-letter">글 추가</button><button id="reload">새로고침</button><button id="show-letter-history">변경 이력</button></div>
+    <section id="all-letter-history" class="panel" aria-label="글 변경 이력" hidden></section>
     <div id="editor"></div><form id="letter-filter" class="toolbar">
-      ${field('query', '검색', letterFilter.query)}${select('status', '상태', letterFilter.status, [['', '전체'], ...Object.entries(labels)])}
+      ${field('query', '본문·별명 검색', letterFilter.query)}${select('status', '상태', letterFilter.status, [['', '전체'], ...Object.entries(labels), ['trash', '휴지통']])}
       ${select('sort', '작성일', letterFilter.sort, [
         ['desc', '최신순'],
         ['asc', '오래된 순'],
       ])}<button>검색</button></form>
-    <p id="letter-count"></p><div id="letter-list"></div><div id="pagination" class="actions"></div>
+    ${trash ? '<p class="muted">복원한 글은 검토 대기로 돌아갑니다.</p>' : `<div class="selection-bar"><label class="checkbox"><input type="checkbox" id="select-letters">이 페이지 선택</label><span id="selected-count">0건 선택</span><button id="approve-selected" disabled>선택 승인</button><button id="reject-selected" disabled>선택 제외</button></div>`}
+    <div id="letter-list"></div><div id="pagination" class="actions"></div>
     <details class="panel"><summary>백업·내보내기</summary><div class="actions">
       <button data-export="all:json">전체 JSON</button><button data-export="all:csv">글 CSV</button><button data-export="public:json">공개 JSON</button><button id="sync-public">기존 승인 글 반영</button></div></details>`;
   $('#new-letter').onclick = () => letterEditor();
+  $('#show-letter-history').onclick = () => toggleLetterHistory(null, $('#all-letter-history'));
   $('#reload').onclick = () => renderTab(true);
   $('#letter-filter').onsubmit = (event) => {
     event.preventDefault();
+    if (busy || !confirmDiscard()) return;
     letterFilter = data(event.currentTarget);
-    letterPage = 1;
-    renderLetters();
+    resetLetterPages();
+    void renderTab();
   };
+  if (!trash) {
+    $('#select-letters').onchange = (event) => {
+      selectedLetters.clear();
+      if (event.currentTarget.checked) letters.forEach((item) => selectedLetters.add(item.id));
+      document.querySelectorAll('[data-select-letter]').forEach((control) => {
+        control.checked = selectedLetters.has(control.dataset.selectLetter);
+      });
+      updateLetterSelection();
+    };
+    $('#approve-selected').onclick = () => changeLetterStatus([...selectedLetters], 'approved');
+    $('#reject-selected').onclick = () => changeLetterStatus([...selectedLetters], 'rejected');
+  }
   $('#sync-public').onclick = () =>
     void run(async () =>
       setStatus(`${await synchronizePublicLetters((await adminContext()).db)}건 반영`),
     );
   bindExports();
   renderLetters();
+  if (!trash) updateLetterSelection();
 }
 function bindExports() {
   document.querySelectorAll('[data-export]').forEach(
@@ -453,33 +532,28 @@ function paginate(total, size, page, change) {
   $('#next').onclick = () => change(page + 1);
 }
 function renderLetters() {
-  const records = letters
-    .filter(
-      (letter) =>
-        (!letterFilter.status || letter.status === letterFilter.status) &&
-        `${letter.nickname ?? ''} ${letter.content} ${letter.published_content ?? ''}`
-          .toLowerCase()
-          .includes(letterFilter.query.toLowerCase()),
-    )
-    .sort(
-      (a, b) =>
-        (letterFilter.sort === 'asc' ? 1 : -1) * a.created_at.localeCompare(b.created_at),
-    );
-  letterPage = Math.min(letterPage, Math.max(1, Math.ceil(records.length / 20)));
-  $('#letter-count').textContent = Object.entries(labels)
-    .map(([key, label]) => `${label} ${letters.filter((item) => item.status === key).length}`)
-    .join(' · ');
+  const trash = letterFilter.status === 'trash';
   $('#letter-list').innerHTML =
-    records
-      .slice((letterPage - 1) * 20, letterPage * 20)
+    letters
       .map(
-        (letter) => `<article class="panel">
-    <div class="section-top"><strong>${html(letter.nickname || '익명')}</strong><span>${html(labels[letter.status])}</span></div>
+        (letter) => `<article class="panel letter-card">
+    <div class="section-top"><div class="record-heading">${trash ? '' : `<input type="checkbox" data-select-letter="${letter.id}" aria-label="${html(`${letter.nickname || '익명'} 글 선택`)}">`}<strong>${html(letter.nickname || '익명')}</strong></div><span class="badge" data-status="${html(trash ? 'trash' : letter.status)}">${html(trash ? '휴지통' : labels[letter.status])}</span></div>
     <p class="letter-content">${html(letter.content)}</p><small>${html(koreanDate(letter.created_at))} · 순서 ${letter.publish_order ?? '미지정'}</small>
     <p class="muted">${html(letterAuthor(letter))}</p>
-    <div class="actions"><button data-edit="${letter.id}">수정·검수</button>${students.some((student) => student.student_id === letter.owner_uid) ? `<button data-letter-student="${letter.id}">작성 계정 관리</button>` : ''}<button class="danger" data-delete="${letter.id}">삭제</button></div></article>`,
+    <div class="actions">${trash ? `<button data-restore-letter="${letter.id}">복원</button><button class="danger" data-purge-letter="${letter.id}">영구 삭제</button>` : `<button data-review-letter="${letter.id}" data-review-status="approved"${letter.status === 'approved' ? ' disabled' : ''}>승인</button><button data-review-letter="${letter.id}" data-review-status="rejected"${letter.status === 'rejected' ? ' disabled' : ''}>제외</button><button data-edit="${letter.id}">수정</button>${students.some((student) => student.student_id === letter.owner_uid) ? `<button data-letter-student="${letter.id}">작성 계정</button>` : ''}<button class="danger" data-delete="${letter.id}">휴지통</button>`}<button data-letter-history="${letter.id}">이력</button></div><div data-history-for="${letter.id}" hidden></div></article>`,
       )
       .join('') || '<p>글 없음</p>';
+  document.querySelectorAll('[data-select-letter]').forEach((control) => {
+    control.onchange = () => {
+      if (control.checked) selectedLetters.add(control.dataset.selectLetter);
+      else selectedLetters.delete(control.dataset.selectLetter);
+      updateLetterSelection();
+    };
+  });
+  document.querySelectorAll('[data-review-letter]').forEach((button) => {
+    button.onclick = () =>
+      changeLetterStatus([button.dataset.reviewLetter], button.dataset.reviewStatus);
+  });
   document
     .querySelectorAll('[data-edit]')
     .forEach(
@@ -490,19 +564,37 @@ function renderLetters() {
   document.querySelectorAll('[data-delete]').forEach(
     (button) =>
       (button.onclick = () => {
-        if (!confirm('글을 삭제할까요? 공개 내용도 삭제되며 되돌릴 수 없습니다.')) return;
+        if (!confirmDiscard($('#editor'))) return;
         void run(async () => {
           await deleteLetter((await adminContext()).db, button.dataset.delete);
-          letters = letters.filter((item) => item.id !== button.dataset.delete);
-          renderLetters();
-          setStatus('삭제 완료');
+          await reloadLetters();
+          setStatus('휴지통으로 이동 완료');
         });
       }),
   );
-  paginate(records.length, 20, letterPage, (value) => {
-    letterPage = value;
-    renderLetters();
+  document.querySelectorAll('[data-restore-letter]').forEach((button) => {
+    button.onclick = () =>
+      void run(async () => {
+        await restoreLetter((await adminContext()).db, button.dataset.restoreLetter);
+        await reloadLetters();
+        setStatus('복원 완료 · 검토 대기');
+      });
   });
+  document.querySelectorAll('[data-purge-letter]').forEach((button) => {
+    button.onclick = () => {
+      if (!confirm('휴지통에서 영구 삭제할까요? 글은 복원할 수 없으며 변경 이력은 유지됩니다.'))
+        return;
+      void run(async () => {
+        await purgeLetter((await adminContext()).db, button.dataset.purgeLetter);
+        await reloadLetters();
+        setStatus('영구 삭제 완료');
+      });
+    };
+  });
+  document.querySelectorAll('[data-letter-history]').forEach((button) => {
+    button.onclick = () => toggleLetterHistory(button.dataset.letterHistory);
+  });
+  cursorPagination('letters');
   document.querySelectorAll('[data-letter-student]').forEach((button) => {
     button.onclick = () => {
       if (busy || !confirmDiscard()) return;
@@ -511,6 +603,120 @@ function renderLetters() {
       location.hash = '#students';
     };
   });
+}
+function updateLetterSelection() {
+  const count = selectedLetters.size;
+  $('#selected-count').textContent = `${count}건 선택`;
+  $('#approve-selected').disabled = !count;
+  $('#reject-selected').disabled = !count;
+  const all = $('#select-letters');
+  all.checked = letters.length > 0 && count === letters.length;
+  all.indeterminate = count > 0 && count < letters.length;
+  all.disabled = !letters.length;
+}
+async function reloadLetters() {
+  $('#editor')?.replaceChildren();
+  resetLetterPages();
+  await renderTab();
+}
+function changeLetterStatus(ids, status) {
+  if (!ids.length || !confirmDiscard($('#editor'))) return;
+  void run(async () => {
+    let result;
+    let failure;
+    try {
+      result = await reviewLetters((await adminContext()).db, ids, status);
+    } catch (reason) {
+      failure = reason;
+    }
+    await reloadLetters();
+    if (failure) throw failure;
+    setStatus(`${typeof result === 'number' ? result : ids.length}건 ${labels[status]} 완료`);
+  });
+}
+function cursorPagination(kind) {
+  const isLetters = kind === 'letters';
+  const page = isLetters ? letterPage : resultPage;
+  const hasNext = isLetters ? letterHasNext : resultHasNext;
+  $('#pagination').innerHTML =
+    `<button id="previous"${page <= 1 ? ' disabled' : ''}>이전</button><span>${page} 페이지 · 현재 ${isLetters ? letters.length : results.length}건</span><button id="next"${!hasNext ? ' disabled' : ''}>다음</button>`;
+  const move = (offset) => {
+    if (busy || !confirmDiscard()) return;
+    if (isLetters) {
+      if (offset > 0) letterCursors[letterPage] = letterNext;
+      letterPage += offset;
+    } else {
+      if (offset > 0) resultCursors[resultPage] = resultNext;
+      resultPage += offset;
+    }
+    void renderTab();
+  };
+  $('#previous').onclick = () => move(-1);
+  $('#next').onclick = () => move(1);
+}
+function toggleLetterHistory(id, target = $(`[data-history-for="${id}"]`)) {
+  if (!target.hidden) {
+    target.hidden = true;
+    return;
+  }
+  target.hidden = false;
+  target.textContent = '불러오는 중';
+  let cursor = null;
+  const load = () =>
+    void run(async () => {
+      const sequence = viewSequence;
+      const page = await readLetterHistory((await adminContext()).db, id, {
+        cursor,
+        pageSize: 20,
+      });
+      if (sequence !== viewSequence || !target.isConnected || !session.authenticated) return;
+      if (!cursor) target.replaceChildren();
+      target.querySelector('button')?.remove();
+      const actions = {
+        create: '추가',
+        edit: '수정',
+        review: '검수',
+        approve: '승인',
+        reject: '제외',
+        trash: '휴지통 이동',
+        restore: '복원',
+        purge: '영구 삭제',
+      };
+      for (const item of page.items) {
+        const row = document.createElement('details');
+        row.className = 'history-entry';
+        row.innerHTML = `<summary>${html(actions[item.action] || item.action)} · ${html(koreanDate(item.created_at))}</summary><small>관리자 ${html(item.operator_uid === session.uid ? session.email : item.operator_uid)}${id ? '' : ` · 글 ${html(item.letter_id)}`}</small>${id ? '' : `<p class="letter-content">${html(item.after?.content || item.before?.content || '')}</p>`}${letterChanges(item.before, item.after)}`;
+        target.append(row);
+      }
+      if (!target.childNodes.length) target.textContent = '변경 이력 없음';
+      cursor = page.cursor;
+      if (page.hasNext) {
+        const more = document.createElement('button');
+        more.textContent = '이력 더 보기';
+        more.onclick = load;
+        target.append(more);
+      }
+      setStatus();
+    });
+  load();
+}
+function letterChanges(before, after) {
+  return (
+    Object.entries({
+      nickname: '별명',
+      content: '본문',
+      published_content: '공개용 본문',
+      status: '상태',
+      publish_order: '공개 순서',
+    })
+      .filter(([key]) => (before?.[key] ?? null) !== (after?.[key] ?? null))
+      .map(([key, label]) => {
+        const value = (record) =>
+          key === 'status' ? labels[record?.[key]] || '—' : (record?.[key] ?? '—');
+        return `<div class="history-change"><strong>${label}</strong><div class="form-grid"><p class="letter-content"><small>이전</small><br>${html(value(before))}</p><p class="letter-content"><small>이후</small><br>${html(value(after))}</p></div></div>`;
+      })
+      .join('') || '<p class="muted">본문 변경 없음</p>'
+  );
 }
 function letterAuthor(letter) {
   const student = students.find((item) => item.student_id === letter.owner_uid);
@@ -533,7 +739,7 @@ function letterEditor(letter) {
   submit($('#letter-editor'), async (values) => {
     if (!letter && !values.consent) throw new Error('공개 동의를 확인하세요.');
     const { db, uid } = await adminContext();
-    const saved = await saveLetter(
+    await saveLetter(
       db,
       uid,
       letter?.id ?? null,
@@ -544,18 +750,12 @@ function letterEditor(letter) {
       },
       creationKey,
     );
-    letters = [saved, ...letters.filter((item) => item.id !== saved.id)];
-    $('#editor').replaceChildren();
-    renderLetters();
+    await reloadLetters();
     setStatus('저장 완료');
   });
 }
 
 async function recordsView() {
-  resultFilter.version ||=
-    results[0]?.challengeId ||
-    challenges.find((item) => item.enabled && !item.deleted)?.challengeId ||
-    '';
   $('#view').innerHTML =
     `<div class="actions"><button id="new-result">추가</button><button id="reload">새로고침</button><button id="result-csv">CSV</button><button id="result-json">JSON</button></div>
     <div id="editor"></div><form id="result-filter" class="toolbar">${field('query', '학번·이름 검색', resultFilter.query)}
@@ -579,31 +779,38 @@ async function recordsView() {
   $('#reload').onclick = () => renderTab(true);
   $('#result-filter').onsubmit = (event) => {
     event.preventDefault();
+    if (busy || !confirmDiscard()) return;
     resultFilter = data(event.currentTarget);
-    resultPage = 1;
-    renderResults();
+    resetResultPages();
+    void renderTab();
   };
   $('#result-csv').onclick = () =>
-    downloadFile(
-      'typing.csv',
-      resultsCsv(scopedResults(), { rankedOnly: resultFilter.view !== 'attempts' }),
-      'text/csv;charset=utf-8',
-    );
+    void run(async () => {
+      const all = await readTyping((await adminContext()).db);
+      downloadFile(
+        'typing.csv',
+        resultsCsv(scopedResults(all), { rankedOnly: resultFilter.view !== 'attempts' }),
+        'text/csv;charset=utf-8',
+      );
+      setStatus('다운로드 완료');
+    });
   $('#result-json').onclick = () =>
-    downloadFile(
-      'typing.json',
-      JSON.stringify({ schemaVersion: 1, results }, null, 2),
-      'application/json',
-    );
+    void run(async () => {
+      const all = await readTyping((await adminContext()).db);
+      downloadFile(
+        'typing.json',
+        JSON.stringify({ schemaVersion: 1, results: all }, null, 2),
+        'application/json',
+      );
+      setStatus('다운로드 완료');
+    });
   $('#sync-pending').onclick = () =>
     void run(async () => {
       const result = await synchronizePending();
+      await reloadResults();
       setStatus(
         `${result.synced}건 접수 · ${result.remaining}건 미전송${result.error ? ` · ${result.error}` : ''}`,
       );
-      results = await readTyping((await adminContext()).db);
-      renderResults();
-      await pendingCount();
     });
   $('#local-json').onclick = () =>
     void run(async () => {
@@ -652,9 +859,9 @@ async function pendingCount() {
     element.textContent = '기기 저장소 사용 불가';
   }
 }
-function scopedResults() {
+function scopedResults(records = results) {
   const aliases = new Map(students.map((student) => [student.student_id, student.login_id]));
-  return results
+  return records
     .filter(
       (item) =>
         item.challengeId === resultFilter.version &&
@@ -663,30 +870,27 @@ function scopedResults() {
     )
     .map((item) => ({ ...item, loginId: aliases.get(item.participantId) ?? null }));
 }
-function filteredResults() {
-  return resultFilter.view === 'attempts'
-    ? rankedAttempts(scopedResults())
-    : rankResults(scopedResults());
+async function reloadResults() {
+  $('#editor')?.replaceChildren();
+  resetResultPages();
+  await renderTab();
 }
 function renderResults() {
-  const ranked = filteredResults();
-  const records = ranked.filter((item) =>
-    `${item.loginId ?? ''} ${item.participantId} ${item.displayName}`
-      .toLowerCase()
-      .includes(resultFilter.query.toLowerCase()),
-  );
-  resultPage = Math.min(resultPage, Math.max(1, Math.ceil(records.length / 50)));
+  const records = scopedResults();
+  const ranking = resultFilter.view !== 'attempts';
   $('#result-list').innerHTML =
-    `<table><caption>${records.length}건 · ${resultFilter.view === 'attempts' ? '전체 시도' : '학번별 최고 기록'} · 점수 → 오타 → 시간</caption><thead><tr><th>순위</th><th>참가자</th><th>점수</th><th>타수·오타</th><th>시간</th><th>확인</th><th>상품</th><th>편집</th></tr></thead><tbody>${records
-      .slice((resultPage - 1) * 50, resultPage * 50)
-      .map(
-        (item) => `<tr>
-    <td>${item.rank ?? '—'}${item.practice ? ' (연습)' : ''}</td><td>${html(item.displayName)}<small>${html(item.loginId || (/^[1-3][0-9]{4}$/.test(item.participantId) ? item.participantId : '미연결'))}</small></td><td>${item.score}</td><td>${item.speed} / ${item.errors}</td><td>${(item.elapsedMs / 1000).toFixed(2)}초</td>
+    `<table><caption>${ranking ? '학번별 최고 기록 · 점수 → 오타 → 시간' : '전체 시도 · 접수 최신순'}</caption><thead><tr>${ranking ? '<th>순위</th>' : ''}<th>참가자</th><th>점수</th><th>타수·오타</th><th>시간</th><th>확인</th><th>상품</th><th>편집</th></tr></thead><tbody>${
+      records
+        .map(
+          (item) => `<tr>
+    ${ranking ? `<td>${item.rank ?? '—'}${item.practice ? ' (연습)' : ''}</td>` : ''}<td>${html(item.displayName)}<small>${html(item.loginId || (/^[1-3][0-9]{4}$/.test(item.participantId) ? item.participantId : '미연결'))}</small></td><td>${item.score}</td><td>${item.speed} / ${item.errors}</td><td>${(item.elapsedMs / 1000).toFixed(2)}초</td>
     <td>${select(`review-${item.id}`, '확인', item.verificationStatus ?? 'pending', Object.entries(verification))}</td>
     <td><button data-prize="${item.id}"${item.practice || item.verificationStatus !== 'verified' ? ' disabled' : ''}>${item.prizeReceived ? '수령' : '미수령'}</button></td>
     <td><button data-edit="${item.id}">수정</button><button class="danger" data-delete="${item.id}">삭제</button></td></tr>`,
-      )
-      .join('')}</tbody></table>`;
+        )
+        .join('') ||
+      `<tr><td colspan="${ranking ? 8 : 7}">${ranking && resultFilter.verification === 'rejected' ? '제외 기록은 전체 시도에서 확인할 수 있습니다.' : '기록 없음'}</td></tr>`
+    }</tbody></table>`;
   document.querySelectorAll('[name^="review-"]').forEach(
     (control) =>
       (control.onchange = () =>
@@ -703,11 +907,7 @@ function renderResults() {
               results.find((item) => item.id === id)?.verificationStatus ?? 'pending';
             throw reason;
           }
-          Object.assign(
-            results.find((item) => item.id === id),
-            patch,
-          );
-          renderResults();
+          await reloadResults();
           setStatus('저장 완료');
         })),
   );
@@ -718,8 +918,7 @@ function renderResults() {
           const item = results.find((item) => item.id === button.dataset.prize);
           const patch = { prizeReceived: !item.prizeReceived };
           await reviewTyping((await adminContext()).db, item.id, patch);
-          Object.assign(item, patch);
-          renderResults();
+          await reloadResults();
           setStatus('저장 완료');
         })),
   );
@@ -736,16 +935,12 @@ function renderResults() {
         if (!confirm('기록을 삭제할까요? 되돌릴 수 없습니다.')) return;
         void run(async () => {
           await deleteTyping((await adminContext()).db, button.dataset.delete);
-          results = results.filter((item) => item.id !== button.dataset.delete);
-          renderResults();
+          await reloadResults();
           setStatus('삭제 완료');
         });
       }),
   );
-  paginate(records.length, 50, resultPage, (page) => {
-    resultPage = page;
-    renderResults();
-  });
+  cursorPagination('records');
 }
 function resultEditor(result) {
   if (!confirmDiscard($('#editor'))) return;
@@ -816,9 +1011,7 @@ function resultEditor(result) {
       },
       creationKey,
     );
-    results = await readTyping(db);
-    $('#editor').replaceChildren();
-    renderResults();
+    await reloadResults();
     setStatus('저장 완료');
   });
 }

@@ -12,6 +12,9 @@
 // moderationLogs/{UUID}: target_student_id, action, reason(1..500), operator_uid,
 // related_letter_id UUID/null, created_at; immutable admin-only audit history.
 // settings/sessionPolicy: boothMode bool, idleMinutes int(1..120), academicYear int(2020..2100), updated_at.
+// letterTrash/{UUID}: private original letter snapshot, trashed_at/by, last_history_id UUID.
+// letterLogs/{UUID[-restore|-purge]}: letter_id, operator_uid, action, before/after snapshots,
+// created_at; immutable and admin-only. Live letters may carry last_history_id.
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -233,33 +236,125 @@ service cloud.firestore {
       allow list: if admin();
       allow update, delete: if false;
     }
-    match /letters/{id} {
-      function valid(data) {
+    function historyId(value) {
+      return value is string && value.matches('[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-restore|-purge)?');
+    }
+    function validLetter(data, id) {
         return data.keys().hasAll(['id', 'owner_uid', 'nickname', 'content', 'published_content', 'consent_to_publish', 'status', 'publish_order', 'submission_key', 'created_at', 'reviewed_at'])
-          && data.keys().hasOnly(['id', 'owner_uid', 'nickname', 'content', 'published_content', 'consent_to_publish', 'status', 'publish_order', 'submission_key', 'created_at', 'reviewed_at'])
+          && data.keys().hasOnly(['id', 'owner_uid', 'nickname', 'content', 'published_content', 'consent_to_publish', 'status', 'publish_order', 'submission_key', 'created_at', 'reviewed_at', 'last_history_id'])
           && data.id == id && uuid(id) && text(data.content, 10, 700)
           && text(data.owner_uid, 1, 128) && data.created_at is timestamp && (data.reviewed_at == null || data.reviewed_at is timestamp)
           && (data.nickname == null || (text(data.nickname, 1, 30) && !data.nickname.matches('(?s).*\\n.*')))
           && data.consent_to_publish == 1 && data.submission_key == id
           && data.status in ['pending', 'approved', 'rejected']
           && (data.published_content == null || text(data.published_content, 1, 700))
-          && (data.publish_order == null || (data.publish_order is int && data.publish_order >= 0 && data.publish_order <= 1000000));
-      }
-      function publicSynced(data) {
+          && (data.publish_order == null || (data.publish_order is int && data.publish_order >= 0 && data.publish_order <= 1000000))
+          && (!('last_history_id' in data) || historyId(data.last_history_id));
+    }
+    function letterPublicSynced(id, data) {
         return data.status == 'approved'
           ? getAfter(/databases/$(database)/documents/publicLetters/$(id)).data == projection(data)
           : !existsAfter(/databases/$(database)/documents/publicLetters/$(id));
+    }
+    function freshLetterLog(logId, id, action, before, after) {
+      let log = getAfter(/databases/$(database)/documents/letterLogs/$(logId)).data;
+      return historyId(logId) && !exists(/databases/$(database)/documents/letterLogs/$(logId))
+        && log.letter_id == id && log.action == action && log.operator_uid == request.auth.uid
+        && log.created_at == request.time && log.before == before && log.after == after;
+    }
+    function letterEditAudit(id, before, after) {
+      let logId = after.last_history_id;
+      let action = getAfter(/databases/$(database)/documents/letterLogs/$(logId)).data.action;
+      return action in ['edit', 'review'] && before.get('last_history_id', '') != logId
+        && (action != 'review' || after.diff(before).affectedKeys().hasOnly(['status', 'reviewed_at', 'last_history_id']))
+        && freshLetterLog(logId, id, action, before, after);
+    }
+    function letterRestore(id, after) {
+      let trash = get(/databases/$(database)/documents/letterTrash/$(id)).data;
+      return !existsAfter(/databases/$(database)/documents/letterTrash/$(id))
+        && after.diff(trash.letter).affectedKeys().hasOnly(['status', 'reviewed_at', 'last_history_id'])
+        && after.status == 'pending' && after.reviewed_at == request.time
+        && after.last_history_id == trash.last_history_id + '-restore'
+        && freshLetterLog(after.last_history_id, id, 'restore', trash.letter, after);
+    }
+    match /letters/{id} {
+      allow read: if admin();
+      allow create: if signedIn() && validLetter(request.resource.data, id)
+        && ((admin() && letterPublicSynced(id, request.resource.data)
+            && ((!exists(/databases/$(database)/documents/letterTrash/$(id))
+                && request.resource.data.owner_uid == request.auth.uid && request.resource.data.created_at == request.time
+                && request.resource.data.reviewed_at == request.time
+                && freshLetterLog(request.resource.data.last_history_id, id, 'create', null, request.resource.data))
+              || (exists(/databases/$(database)/documents/letterTrash/$(id)) && letterRestore(id, request.resource.data))))
+          || (mayWriteLetter() && !('last_history_id' in request.resource.data)
+            && request.resource.data.owner_uid == request.auth.uid && request.resource.data.created_at == request.time
+            && eventOpen('letter') && request.resource.data.status == 'pending' && request.resource.data.published_content == null
+            && request.resource.data.publish_order == null && request.resource.data.reviewed_at == null && newReceipt(id, 'letter')));
+      allow update: if admin() && validLetter(request.resource.data, id)
+        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['nickname', 'content', 'status', 'published_content', 'publish_order', 'reviewed_at', 'last_history_id'])
+        && request.resource.data.reviewed_at == request.time && letterPublicSynced(id, request.resource.data)
+        && letterEditAudit(id, resource.data, request.resource.data);
+      allow delete: if admin() && !existsAfter(/databases/$(database)/documents/publicLetters/$(id))
+        && getAfter(/databases/$(database)/documents/letterTrash/$(id)).data.letter == resource.data
+        && freshLetterLog(getAfter(/databases/$(database)/documents/letterTrash/$(id)).data.last_history_id, id, 'trash', resource.data, null);
+    }
+    match /letterTrash/{id} {
+      function valid(data) {
+        return data.keys().hasAll(['letter', 'trashed_at', 'trashed_by', 'last_history_id'])
+          && data.keys().hasOnly(['letter', 'trashed_at', 'trashed_by', 'last_history_id'])
+          && validLetter(data.letter, id) && data.trashed_at == request.time
+          && data.trashed_by == request.auth.uid && uuid(data.last_history_id);
       }
       allow read: if admin();
-      allow create: if signedIn() && valid(request.resource.data)
-        && request.resource.data.owner_uid == request.auth.uid && request.resource.data.created_at == request.time
-        && ((admin() && request.resource.data.reviewed_at == request.time && publicSynced(request.resource.data))
-          || (mayWriteLetter() && eventOpen('letter') && request.resource.data.status == 'pending' && request.resource.data.published_content == null
-            && request.resource.data.publish_order == null && request.resource.data.reviewed_at == null && newReceipt(id, 'letter')));
-      allow update: if admin() && valid(request.resource.data)
-        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['nickname', 'content', 'status', 'published_content', 'publish_order', 'reviewed_at'])
-        && request.resource.data.reviewed_at == request.time && publicSynced(request.resource.data);
-      allow delete: if admin() && !existsAfter(/databases/$(database)/documents/publicLetters/$(id));
+      allow create: if admin() && valid(request.resource.data)
+        && request.resource.data.letter == get(/databases/$(database)/documents/letters/$(id)).data
+        && !existsAfter(/databases/$(database)/documents/letters/$(id))
+        && !existsAfter(/databases/$(database)/documents/publicLetters/$(id))
+        && freshLetterLog(request.resource.data.last_history_id, id, 'trash', request.resource.data.letter, null);
+      allow update: if false;
+      allow delete: if admin() &&
+        ((existsAfter(/databases/$(database)/documents/letters/$(id))
+            && letterRestore(id, getAfter(/databases/$(database)/documents/letters/$(id)).data))
+          || (!existsAfter(/databases/$(database)/documents/letters/$(id))
+            && !existsAfter(/databases/$(database)/documents/publicLetters/$(id))
+            && freshLetterLog(resource.data.last_history_id + '-purge', id, 'purge', resource.data.letter, null)));
+    }
+    match /letterLogs/{logId} {
+      function valid(data) {
+        return historyId(logId)
+          && data.keys().hasAll(['letter_id', 'operator_uid', 'action', 'before', 'after', 'created_at'])
+          && data.keys().hasOnly(['letter_id', 'operator_uid', 'action', 'before', 'after', 'created_at'])
+          && uuid(data.letter_id) && data.operator_uid == request.auth.uid && data.created_at == request.time
+          && (data.before == null || validLetter(data.before, data.letter_id))
+          && (data.after == null || validLetter(data.after, data.letter_id))
+          && ((data.action == 'create' && data.before == null
+              && !exists(/databases/$(database)/documents/letters/$(data.letter_id))
+              && data.after == getAfter(/databases/$(database)/documents/letters/$(data.letter_id)).data
+              && data.after.last_history_id == logId)
+            || (data.action in ['edit', 'review']
+              && data.before == get(/databases/$(database)/documents/letters/$(data.letter_id)).data
+              && data.after == getAfter(/databases/$(database)/documents/letters/$(data.letter_id)).data
+              && data.after.last_history_id == logId)
+            || (data.action == 'trash' && data.after == null
+              && data.before == get(/databases/$(database)/documents/letters/$(data.letter_id)).data
+              && !existsAfter(/databases/$(database)/documents/letters/$(data.letter_id))
+              && getAfter(/databases/$(database)/documents/letterTrash/$(data.letter_id)).data.last_history_id == logId
+              && getAfter(/databases/$(database)/documents/letterTrash/$(data.letter_id)).data.letter == data.before)
+            || (data.action == 'restore'
+              && data.before == get(/databases/$(database)/documents/letterTrash/$(data.letter_id)).data.letter
+              && logId == get(/databases/$(database)/documents/letterTrash/$(data.letter_id)).data.last_history_id + '-restore'
+              && !existsAfter(/databases/$(database)/documents/letterTrash/$(data.letter_id))
+              && data.after == getAfter(/databases/$(database)/documents/letters/$(data.letter_id)).data
+              && data.after.last_history_id == logId)
+            || (data.action == 'purge' && data.after == null
+              && data.before == get(/databases/$(database)/documents/letterTrash/$(data.letter_id)).data.letter
+              && logId == get(/databases/$(database)/documents/letterTrash/$(data.letter_id)).data.last_history_id + '-purge'
+              && !existsAfter(/databases/$(database)/documents/letterTrash/$(data.letter_id))
+              && !existsAfter(/databases/$(database)/documents/letters/$(data.letter_id))));
+      }
+      allow read: if admin();
+      allow create: if admin() && valid(request.resource.data);
+      allow update, delete: if false;
     }
     function projection(data) {
       return {'id': data.id, 'nickname': data.nickname == null ? '익명' : data.nickname,

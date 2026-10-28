@@ -19,6 +19,7 @@ const legacy = [
   'settings',
 ];
 const current = [...legacy, 'students', 'moderationLogs'];
+const audited = [...current, 'letterTrash', 'letterLogs'];
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 function validValue(value, depth = 0) {
   if (depth > 20) throw new Error('BACKUP_TOO_DEEP');
@@ -64,7 +65,7 @@ function validValue(value, depth = 0) {
 export function validateBackup(input) {
   if (
     !input ||
-    ![2, 3].includes(input.schemaVersion) ||
+    ![2, 3, 4].includes(input.schemaVersion) ||
     input.backend !== 'firebase' ||
     typeof input.projectId !== 'string' ||
     !input.projectId ||
@@ -74,7 +75,8 @@ export function validateBackup(input) {
     Array.isArray(input.collections)
   )
     throw new Error('INVALID_BACKUP');
-  const allowed = input.schemaVersion === 3 ? current : legacy;
+  const allowed =
+    input.schemaVersion === 4 ? audited : input.schemaVersion === 3 ? current : legacy;
   const records = [];
   for (const [collection, rows] of Object.entries(input.collections)) {
     if (!allowed.includes(collection) || !Array.isArray(rows))
@@ -85,11 +87,15 @@ export function validateBackup(input) {
       const validId =
         collection === 'students'
           ? /^(?:[A-Za-z0-9_-]{20}|\d{7})$/.test(id)
-          : collection === 'settings'
-            ? ['event', 'sessionPolicy'].includes(id)
-            : collection === 'challenges'
-              ? /^[a-zA-Z0-9_-]{1,100}$/.test(id)
-              : uuid.test(id);
+          : collection === 'letterLogs'
+            ? /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}(-restore|-purge)?$/.test(
+                id,
+              )
+            : collection === 'settings'
+              ? ['event', 'sessionPolicy'].includes(id)
+              : collection === 'challenges'
+                ? /^[a-zA-Z0-9_-]{1,100}$/.test(id)
+                : uuid.test(id);
       if (
         typeof id !== 'string' ||
         !validId ||
