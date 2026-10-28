@@ -1,4 +1,4 @@
-import { errorMessage, getClients } from '../firebase.js';
+import { errorMessage, getPublicDb } from '../firebase.js';
 import { readEvent, readPublicLetters } from '../database.js';
 
 const status = document.querySelector('#status');
@@ -42,7 +42,7 @@ async function load(targetPage = page) {
   next.disabled = true;
   status.textContent = '불러오는 중';
   try {
-    const { deviceDb } = await getClients();
+    const deviceDb = await getPublicDb();
     const config = await readEvent(deviceDb);
     if (!config.welcomeEnabled) {
       letters.replaceChildren();

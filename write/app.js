@@ -33,16 +33,29 @@ function showError(message = '') {
 }
 
 function updateControls() {
-  const locked = busy || !!pending;
-  nickname.disabled = locked;
-  content.disabled = locked;
-  consent.disabled = locked;
   const blocked =
     student?.writeBlocked &&
     (!student.blockedUntil || student.blockedUntil.toMillis() > Date.now());
+  const locked = busy || !!pending || !!blocked;
+  nickname.disabled = locked;
+  content.disabled = locked;
+  consent.disabled = locked;
   submitButton.disabled =
     !student || blocked || busy || !!eventRequest || (!pending && !config?.submissionsEnabled);
-  if (blocked) eventStatus.textContent = '글 작성이 제한된 계정입니다. 운영진에게 문의하세요.';
+  eventStatus.textContent = blocked
+    ? '글 작성이 제한된 계정입니다. 운영진에게 문의하세요.'
+    : eventRequest
+      ? '접수 상태 확인 중'
+      : config
+        ? config.submissionsEnabled
+          ? '접수 중'
+          : '접수 마감'
+        : '접수 상태 확인 실패';
+  clearTimeout(unblockTimer);
+  if (blocked && student.blockedUntil) {
+    const delay = student.blockedUntil.toMillis() - Date.now();
+    unblockTimer = setTimeout(updateControls, Math.min(delay + 10, 2147483647));
+  }
   submitButton.textContent = busy ? '제출 중' : pending ? '다시 제출' : '제출';
   resetButton.disabled =
     busy || (!nickname.value && !content.value && !consent.checked && !pending);
@@ -56,16 +69,13 @@ function updateControls() {
 
 function checkEvent() {
   if (eventRequest) return eventRequest;
-  eventStatus.textContent = '접수 상태 확인 중';
   eventRequest = (async () => {
     try {
       config = await readEvent((await getClients()).deviceDb);
-      eventStatus.textContent = config.submissionsEnabled ? '접수 중' : '접수 마감';
       retryEvent.hidden = config.submissionsEnabled;
       return config;
     } catch (reason) {
       config = null;
-      eventStatus.textContent = '접수 상태 확인 실패';
       retryEvent.hidden = false;
       showError(errorMessage(reason));
       return null;
@@ -112,7 +122,7 @@ form.addEventListener('submit', async (event) => {
       }
     }
     if (version !== sessionVersion) return;
-    pending = validated.value;
+    pending ||= validated.value;
     updateControls();
     const { db, uid } = await studentContext({ writing: true });
     if (version !== sessionVersion || uid !== expectedUid)
@@ -135,8 +145,10 @@ form.addEventListener('submit', async (event) => {
   } catch (reason) {
     if (version === sessionVersion) showError(errorMessage(reason));
   } finally {
-    busy = false;
-    updateControls();
+    if (version === sessionVersion) {
+      busy = false;
+      updateControls();
+    }
   }
 });
 
@@ -176,13 +188,9 @@ const login = mountLogin({
     student = profile;
     document.querySelector('#student-view').hidden = false;
     document.querySelector('#new-letter').hidden = false;
-    clearTimeout(unblockTimer);
-    if (profile.blockedUntil) {
-      const delay = profile.blockedUntil.toMillis() - Date.now();
-      if (delay > 0 && delay < 2147483647) unblockTimer = setTimeout(updateControls, delay + 10);
-    }
     if (entering) {
       sessionVersion++;
+      busy = false;
       reset();
     } else updateControls();
   },
@@ -194,10 +202,11 @@ const login = mountLogin({
     );
   },
   canAutoLogout() {
-    return !busy;
+    return !busy && !pending;
   },
   onLogout(cause) {
     sessionVersion++;
+    busy = false;
     student = null;
     clearTimeout(unblockTimer);
     form.reset();

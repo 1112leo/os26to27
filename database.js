@@ -377,7 +377,7 @@ export async function readEvent(db) {
   const phase = snapshot.data()?.phase;
   if (!['A', 'B', 'C'].includes(phase))
     throw new ClientError(
-      'Firebase 초기 설정이 필요합니다. 관리자에게 행사 설정과 대회 문구 등록을 요청해 주세요.',
+      '운영 설정이 준비되지 않았습니다. 운영진에게 문의하세요.',
       503,
       'SETUP_REQUIRED',
     );

@@ -3,25 +3,6 @@ import {
   initializeApp,
 } from 'https://www.gstatic.com/firebasejs/13.1.0/firebase-app.js';
 import {
-  browserLocalPersistence,
-  browserSessionPersistence,
-  connectAuthEmulator,
-  initializeAuth,
-  onIdTokenChanged,
-  signInWithEmailAndPassword,
-  signOut,
-  EmailAuthProvider,
-  reauthenticateWithCredential,
-  updatePassword,
-  verifyBeforeUpdateEmail,
-  sendPasswordResetEmail,
-  createUserWithEmailAndPassword,
-  deleteUser,
-  inMemoryPersistence,
-  setPersistence,
-  updateCurrentUser,
-} from 'https://www.gstatic.com/firebasejs/13.1.0/firebase-auth.js';
-import {
   connectFirestoreEmulator,
   getFirestore,
   doc,
@@ -83,13 +64,13 @@ export function firebaseError(error) {
       code,
     );
   if (code.includes('operation-not-allowed'))
-    return new ClientError('Firebase에서 이메일/비밀번호 인증을 활성화해 주세요.', 503, code);
-  if (code.includes('unavailable') || code.includes('network') || code.includes('deadline'))
     return new ClientError(
-      'Firebase에 연결하지 못했습니다. 입력 내용은 유지되며 같은 요청으로 재시도할 수 있습니다.',
+      '로그인 서비스가 준비되지 않았습니다. 운영진에게 문의하세요.',
       503,
       code,
     );
+  if (code.includes('unavailable') || code.includes('network') || code.includes('deadline'))
+    return new ClientError('서버에 연결하지 못했습니다. 잠시 후 다시 시도하세요.', 503, code);
   return new ClientError(
     error instanceof Error ? error.message : '처리에 실패했습니다. 다시 시도해 주세요.',
     500,
@@ -106,7 +87,7 @@ export async function withDeadline(promise, milliseconds = 20000) {
           () =>
             reject(
               new ClientError(
-                '응답 확인 시간이 초과되었습니다. 내용은 유지됩니다. 같은 요청으로 재시도해 주세요.',
+                '응답 확인 시간이 초과되었습니다. 다시 시도하세요.',
                 503,
                 'DEADLINE',
               ),
@@ -123,6 +104,19 @@ export async function withDeadline(promise, milliseconds = 20000) {
 }
 export const errorMessage = (error) => firebaseError(error).message;
 let clients = null;
+let connection = null;
+let publicDb = null;
+let authSdk;
+let authSdkRequest;
+function loadAuthSdk() {
+  return (authSdkRequest ??=
+    import('https://www.gstatic.com/firebasejs/13.1.0/firebase-auth.js')
+      .then((sdk) => (authSdk = sdk))
+      .catch((error) => {
+        authSdkRequest = null;
+        throw error;
+      }));
+}
 let authGeneration = 0;
 const authIntents = { student: 0, admin: 0 };
 let authMutations = Promise.resolve();
@@ -158,15 +152,15 @@ async function temporaryLogin(clients, intent, email, password, verify) {
   let auth;
   let closed = false;
   try {
-    auth = initializeAuth(app, { persistence: inMemoryPersistence });
+    auth = authSdk.initializeAuth(app, { persistence: authSdk.inMemoryPersistence });
     const db = getFirestore(app);
     if (clients.emulator) {
-      connectAuthEmulator(auth, 'http://127.0.0.1:9098', { disableWarnings: true });
+      authSdk.connectAuthEmulator(auth, 'http://127.0.0.1:9098', { disableWarnings: true });
       connectFirestoreEmulator(db, '127.0.0.1', 8088);
     }
     // The request may finish after our timeout. Only this unobserved memory Auth may change.
     const validation = (async () => {
-      const { user } = await signInWithEmailAndPassword(auth, email, password);
+      const { user } = await authSdk.signInWithEmailAndPassword(auth, email, password);
       requireCurrentLogin(intent);
       if (closed) throw new ClientError('로그인 요청이 만료되었습니다.', 408, 'DEADLINE');
       const session = await verify(user, db);
@@ -178,31 +172,31 @@ async function temporaryLogin(clients, intent, email, password, verify) {
     return await mutateAuth(async () => {
       requireCurrentLogin(intent);
       const target = intent.kind === 'student' ? clients.studentAuth : clients.adminAuth;
-      await updateCurrentUser(target, user);
+      await authSdk.updateCurrentUser(target, user);
       try {
         requireCurrentLogin(intent);
       } catch (reason) {
         // Finish clearing this publication before a newer login or logout may mutate Auth.
-        await signOut(target);
+        await authSdk.signOut(target);
         throw reason;
       }
       return session;
     });
   } finally {
     closed = true;
-    if (auth) await signOut(auth).catch(() => {});
+    if (auth) await authSdk.signOut(auth).catch(() => {});
     await deleteApp(app).catch(() => {});
   }
 }
 async function clearLoginSessions(clients, intent) {
   await mutateAuth(async () => {
     requireCurrentLogin(intent);
-    await signOut(clients.adminAuth);
-    if (intent.kind === 'student') await signOut(clients.studentAuth);
+    await authSdk.signOut(clients.adminAuth);
+    if (intent.kind === 'student') await authSdk.signOut(clients.studentAuth);
     requireCurrentLogin(intent);
   });
 }
-async function initialize() {
+async function readConnection() {
   const emulator =
     ['localhost', '127.0.0.1'].includes(location.hostname) &&
     new URLSearchParams(location.search).get('emulator') === '1';
@@ -227,72 +221,99 @@ async function initialize() {
         'FIREBASE_NOT_CONFIGURED',
       );
   }
-  const suffix = `${config.projectId}-${emulator ? 'local' : 'cloud'}`;
-  const deviceApp = initializeApp(config, `ohsung-device-${suffix}`);
-  const adminApp = initializeApp(config, `ohsung-admin-${suffix}`);
-  const deviceAuth = initializeAuth(deviceApp, {
-    persistence: browserLocalPersistence,
-  });
-  const adminAuth = initializeAuth(adminApp, {
-    persistence: browserSessionPersistence,
-  });
-  const deviceDb = getFirestore(deviceApp);
-  const adminDb = getFirestore(adminApp);
-  if (emulator) {
-    connectAuthEmulator(deviceAuth, 'http://127.0.0.1:9098', {
-      disableWarnings: true,
+  return { config, emulator, suffix: `${config.projectId}-${emulator ? 'local' : 'cloud'}` };
+}
+function getConnection() {
+  return (connection ??= readConnection().catch((error) => {
+    connection = null;
+    throw error;
+  }));
+}
+export function getPublicDb() {
+  return (publicDb ??= (async () => {
+    const { config, emulator, suffix } = await getConnection();
+    const app = initializeApp(config, `ohsung-device-${suffix}`);
+    try {
+      const db = getFirestore(app);
+      if (emulator) connectFirestoreEmulator(db, '127.0.0.1', 8088);
+      return db;
+    } catch (error) {
+      await deleteApp(app).catch(() => {});
+      throw error;
+    }
+  })().catch((error) => {
+    publicDb = null;
+    throw error;
+  }));
+}
+async function initialize() {
+  const [{ config, emulator, suffix }, deviceDb] = await Promise.all([
+    getConnection(),
+    getPublicDb(),
+    loadAuthSdk(),
+  ]);
+  const apps = [];
+  try {
+    const adminApp = initializeApp(config, `ohsung-admin-${suffix}`);
+    apps.push(adminApp);
+    const adminAuth = authSdk.initializeAuth(adminApp, {
+      persistence: authSdk.browserSessionPersistence,
     });
-    connectAuthEmulator(adminAuth, 'http://127.0.0.1:9098', {
-      disableWarnings: true,
+    const adminDb = getFirestore(adminApp);
+    if (emulator) {
+      authSdk.connectAuthEmulator(adminAuth, 'http://127.0.0.1:9098', {
+        disableWarnings: true,
+      });
+      connectFirestoreEmulator(adminDb, '127.0.0.1', 8088);
+      await adminAuth.authStateReady();
+      try {
+        await adminAuth.currentUser?.getIdToken(true);
+      } catch (error) {
+        if (
+          [
+            'auth/invalid-refresh-token',
+            'auth/user-token-expired',
+            'auth/user-not-found',
+          ].includes(error.code)
+        )
+          await authSdk.signOut(adminAuth);
+        else throw error;
+      }
+    }
+    const policySnapshot = await withDeadline(
+      getDoc(doc(deviceDb, 'settings', 'sessionPolicy')),
+    ).catch(() => null);
+    const policy = sessionPolicy(policySnapshot?.data());
+    const studentApp = initializeApp(config, `ohsung-student-${suffix}`);
+    apps.push(studentApp);
+    const studentAuth = authSdk.initializeAuth(studentApp, {
+      persistence: authSdk.browserSessionPersistence,
     });
-    connectFirestoreEmulator(deviceDb, '127.0.0.1', 8088);
-    connectFirestoreEmulator(adminDb, '127.0.0.1', 8088);
-    await Promise.all(
-      [deviceAuth, adminAuth].map(async (auth) => {
-        await auth.authStateReady();
-        try {
-          await auth.currentUser?.getIdToken(true);
-        } catch (error) {
-          const code = error.code ?? '';
-          if (
-            [
-              'auth/invalid-refresh-token',
-              'auth/user-token-expired',
-              'auth/user-not-found',
-            ].includes(code)
-          )
-            await signOut(auth);
-          else throw error;
-        }
-      }),
-    );
+    if (emulator)
+      authSdk.connectAuthEmulator(studentAuth, 'http://127.0.0.1:9098', {
+        disableWarnings: true,
+      });
+    const studentDb = getFirestore(studentApp);
+    if (emulator) connectFirestoreEmulator(studentDb, '127.0.0.1', 8088);
+    await studentAuth.authStateReady();
+    if (policy.boothMode) {
+      await authSdk.setPersistence(studentAuth, authSdk.inMemoryPersistence);
+      await authSdk.signOut(studentAuth);
+    }
+    return {
+      adminAuth,
+      deviceDb,
+      adminDb,
+      studentAuth,
+      studentDb,
+      policy,
+      emulator,
+      projectId: config.projectId,
+    };
+  } catch (error) {
+    await Promise.allSettled(apps.map((app) => deleteApp(app)));
+    throw error;
   }
-  const policySnapshot = await withDeadline(
-    getDoc(doc(deviceDb, 'settings', 'sessionPolicy')),
-  ).catch(() => null);
-  const policy = sessionPolicy(policySnapshot?.data());
-  const studentApp = initializeApp(config, `ohsung-student-${suffix}`);
-  const studentAuth = initializeAuth(studentApp, { persistence: browserSessionPersistence });
-  if (emulator)
-    connectAuthEmulator(studentAuth, 'http://127.0.0.1:9098', { disableWarnings: true });
-  const studentDb = getFirestore(studentApp);
-  if (emulator) connectFirestoreEmulator(studentDb, '127.0.0.1', 8088);
-  await studentAuth.authStateReady();
-  if (policy.boothMode) {
-    await setPersistence(studentAuth, inMemoryPersistence);
-    await signOut(studentAuth);
-  }
-  return {
-    deviceAuth,
-    adminAuth,
-    deviceDb,
-    adminDb,
-    studentAuth,
-    studentDb,
-    policy,
-    emulator,
-    projectId: config.projectId,
-  };
 }
 export function getClients() {
   if (!clients)
@@ -301,9 +322,6 @@ export function getClients() {
       throw error;
     });
   return clients;
-}
-export async function deviceIdentity() {
-  return studentContext();
 }
 
 export function sessionPolicy(data) {
@@ -386,7 +404,7 @@ export async function logoutStudent() {
   const generation = invalidateLogin('student');
   const { studentAuth } = await getClients();
   await mutateAuth(async () => {
-    if (authIntents.student === generation) await signOut(studentAuth);
+    if (authIntents.student === generation) await authSdk.signOut(studentAuth);
   });
 }
 export async function studentContext({ writing = false } = {}) {
@@ -404,7 +422,7 @@ export async function watchStudentSession(onChange, onError) {
   const clients = await getClients();
   let stopProfile = () => {};
   let sequence = 0;
-  const stopAuth = onIdTokenChanged(clients.studentAuth, (user) => {
+  const stopAuth = authSdk.onIdTokenChanged(clients.studentAuth, (user) => {
     const current = ++sequence;
     stopProfile();
     if (!user) {
@@ -451,12 +469,12 @@ export async function watchSessionPolicy(onChange, onError) {
         invalidateLogin('student');
         clients.policyTransition = mutateAuth(async () => {
           try {
-            await setPersistence(
+            await authSdk.setPersistence(
               clients.studentAuth,
-              next.boothMode ? inMemoryPersistence : browserSessionPersistence,
+              next.boothMode ? authSdk.inMemoryPersistence : authSdk.browserSessionPersistence,
             );
           } finally {
-            await signOut(clients.studentAuth);
+            await authSdk.signOut(clients.studentAuth);
           }
         });
         // Keep a failed transition rejected so a later login cannot use the old persistence.
@@ -510,7 +528,7 @@ export async function logoutAdmin() {
   const generation = invalidateLogin('admin');
   const { adminAuth } = await getClients();
   await mutateAuth(async () => {
-    if (authIntents.admin === generation) await signOut(adminAuth);
+    if (authIntents.admin === generation) await authSdk.signOut(adminAuth);
   });
   return {
     authenticated: false,
@@ -521,18 +539,23 @@ async function reauthenticateAdmin(password) {
   const user = (await getClients()).adminAuth.currentUser;
   if (!user.email) throw new ClientError('이메일 계정으로 다시 로그인해 주세요.', 401);
   await withDeadline(
-    reauthenticateWithCredential(user, EmailAuthProvider.credential(user.email, password)),
+    authSdk.reauthenticateWithCredential(
+      user,
+      authSdk.EmailAuthProvider.credential(user.email, password),
+    ),
   );
   return user;
 }
 export async function changeAdminPassword(currentPassword, nextPassword) {
   if (nextPassword.length < 12)
     throw new ClientError('새 비밀번호는 12자 이상으로 입력해 주세요.', 400);
-  await withDeadline(updatePassword(await reauthenticateAdmin(currentPassword), nextPassword));
+  await withDeadline(
+    authSdk.updatePassword(await reauthenticateAdmin(currentPassword), nextPassword),
+  );
 }
 export async function changeAdminEmail(currentPassword, email) {
   await withDeadline(
-    verifyBeforeUpdateEmail(
+    authSdk.verifyBeforeUpdateEmail(
       await reauthenticateAdmin(currentPassword),
       email.trim(),
       emailActionSettings(),
@@ -542,7 +565,9 @@ export async function changeAdminEmail(currentPassword, email) {
 export async function resetAdminPassword(email) {
   const { adminAuth } = await getClients();
   adminAuth.languageCode = 'ko';
-  await withDeadline(sendPasswordResetEmail(adminAuth, email.trim(), emailActionSettings()));
+  await withDeadline(
+    authSdk.sendPasswordResetEmail(adminAuth, email.trim(), emailActionSettings()),
+  );
 }
 function emailActionSettings() {
   const base = new URL('../../', location.href);
@@ -569,16 +594,16 @@ export async function createOperator(email, password) {
     clients.adminDb.app.options,
     `ohsung-new-operator-${crypto.randomUUID()}`,
   );
-  const auth = initializeAuth(app, {
-    persistence: inMemoryPersistence,
+  const auth = authSdk.initializeAuth(app, {
+    persistence: authSdk.inMemoryPersistence,
   });
   if (clients.emulator)
-    connectAuthEmulator(auth, 'http://127.0.0.1:9098', {
+    authSdk.connectAuthEmulator(auth, 'http://127.0.0.1:9098', {
       disableWarnings: true,
     });
   try {
     const { user } = await withDeadline(
-      createUserWithEmailAndPassword(auth, email.trim(), password),
+      authSdk.createUserWithEmailAndPassword(auth, email.trim(), password),
     );
     try {
       await withDeadline(
@@ -591,38 +616,52 @@ export async function createOperator(email, password) {
     } catch (error) {
       const role = await withDeadline(getDoc(doc(db, 'admins', user.uid)));
       if (role.data()?.enabled !== true) {
-        await deleteUser(user);
+        await authSdk.deleteUser(user);
         throw error;
       }
     }
     return user.uid;
   } finally {
-    await signOut(auth);
+    await authSdk.signOut(auth);
     await deleteApp(app);
   }
 }
 export async function watchAdminSession(onChange, onError) {
-  const { adminAuth } = await getClients();
+  const { adminAuth, adminDb } = await getClients();
   let sequence = 0;
   let previousUid = null;
-  const stop = onIdTokenChanged(adminAuth, (user) => {
+  let stopRole = () => {};
+  const stopAuth = authSdk.onIdTokenChanged(adminAuth, (user) => {
     const current = ++sequence;
+    stopRole();
+    stopRole = () => {};
     if (!user || user.uid !== previousUid)
       onChange({
         authenticated: false,
       });
     previousUid = user?.uid ?? null;
-    void adminSession()
-      .then((session) => {
-        if (current === sequence) onChange(session);
-      })
-      .catch((error) => {
+    if (!user) return;
+    stopRole = onSnapshot(
+      doc(adminDb, 'admins', user.uid),
+      { includeMetadataChanges: true },
+      (snapshot) => {
+        if (current !== sequence || snapshot.metadata?.fromCache) return;
+        const authenticated = snapshot.data()?.enabled === true;
+        onChange({ authenticated, uid: user.uid, email: user.email ?? undefined });
+        if (!authenticated)
+          void logoutAdmin().catch((error) => {
+            if (current === sequence) onError(error);
+          });
+      },
+      (error) => {
         if (current === sequence) onError(error);
-      });
+      },
+    );
   });
   return () => {
     sequence++;
-    stop();
+    stopRole();
+    stopAuth();
   };
 }
 

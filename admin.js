@@ -82,7 +82,7 @@ let results = [];
 let challenges = [];
 let students = [];
 let sessionPolicy = { ...DEFAULT_SESSION_POLICY };
-let studentFilter = { query: '', grade: '' };
+let studentFilter = { query: '', grade: '', unlinkedOnly: false };
 let studentPage = 1;
 let studentDetailSequence = 0;
 let pendingStudentDetail = null;
@@ -93,6 +93,56 @@ let letterFilter = { query: '', status: feature === 'welcome' ? 'approved' : '',
 let resultFilter = { query: '', version: '', verification: 'all', view: 'ranking' };
 let renderedHash = location.hash;
 const savedForms = new WeakMap();
+let rosterCache = null;
+let rosterExpiresAt = 0;
+let rosterRequest = null;
+let rosterRevision = 0;
+
+function clearStudentRoster() {
+  rosterRevision++;
+  rosterCache = null;
+  rosterExpiresAt = 0;
+  rosterRequest = null;
+  students = [];
+  studentFilter = { query: '', grade: '', unlinkedOnly: false };
+  studentPage = 1;
+  studentDetailSequence++;
+  pendingStudentDetail = null;
+}
+function loadStudentRoster(db, force = false) {
+  if (force) {
+    rosterRevision++;
+    rosterCache = null;
+    rosterExpiresAt = 0;
+    rosterRequest = null;
+  }
+  if (rosterCache && Date.now() < rosterExpiresAt) return Promise.resolve(rosterCache);
+  if (rosterRequest) return rosterRequest;
+  const revision = rosterRevision;
+  const uid = session.uid;
+  const request = readStudents(db)
+    .then((records) => {
+      if (revision !== rosterRevision || !session.authenticated || session.uid !== uid)
+        throw new Error('관리자 세션이 변경되었습니다. 다시 로그인하세요.');
+      rosterCache = records;
+      rosterExpiresAt = Date.now() + 60000;
+      return records;
+    })
+    .finally(() => {
+      if (rosterRequest === request) rosterRequest = null;
+    });
+  rosterRequest = request;
+  return request;
+}
+function updateStudentRoster(studentId, saved) {
+  // 저장 전에 시작된 명부 요청이 정정한 상태를 덮어쓰지 않게 합니다.
+  rosterRevision++;
+  rosterRequest = null;
+  const update = (records) =>
+    records.map((item) => (item.student_id === studentId ? { ...saved, id: studentId } : item));
+  students = update(students);
+  if (rosterCache) rosterCache = update(rosterCache);
+}
 
 function formState(form) {
   return JSON.stringify(
@@ -134,6 +184,10 @@ function restoreHash() {
 }
 function applySession(next) {
   const entering = !session.authenticated || next.uid !== session.uid;
+  if (!next.authenticated || next.uid !== session.uid) {
+    viewSequence++;
+    clearStudentRoster();
+  }
   session = next;
   if (!next.authenticated) {
     pendingStudentDetail = null;
@@ -147,7 +201,8 @@ function applySession(next) {
   else if ($('#identity')) $('#identity').textContent = next.email ?? '';
 }
 function sessionFailed(reason) {
-  pendingStudentDetail = null;
+  viewSequence++;
+  clearStudentRoster();
   session = { authenticated: false };
   letters = [];
   results = [];
@@ -262,7 +317,7 @@ function showAdmin() {
     });
   void renderTab();
 }
-async function renderTab() {
+async function renderTab(forceStudents = false) {
   if (!session.authenticated || !confirmDiscard()) return;
   const sequence = ++viewSequence;
   renderedHash = location.hash;
@@ -281,9 +336,17 @@ async function renderTab() {
   try {
     const { db } = await adminContext();
     let loaded;
-    if (tab === 'letters') loaded = await Promise.all([readLetters(db), readStudents(db)]);
+    if (tab === 'letters')
+      loaded = await Promise.all([
+        readLetters(db),
+        loadStudentRoster(db, forceStudents === true),
+      ]);
     if (tab === 'records')
-      loaded = await Promise.all([readTyping(db), readChallenges(db), readStudents(db)]);
+      loaded = await Promise.all([
+        readTyping(db),
+        readChallenges(db),
+        loadStudentRoster(db, forceStudents === true),
+      ]);
     if (tab === 'settings')
       loaded = await Promise.all([
         readEvent(db).catch(() => null),
@@ -291,7 +354,10 @@ async function renderTab() {
         readSessionPolicy(db),
       ]);
     if (tab === 'students')
-      loaded = await Promise.all([readStudents(db), readSessionPolicy(db)]);
+      loaded = await Promise.all([
+        loadStudentRoster(db, forceStudents === true),
+        readSessionPolicy(db),
+      ]);
     if (sequence !== viewSequence) return;
     if (tab === 'letters') {
       [letters, students] = loaded;
@@ -353,7 +419,7 @@ function lettersView() {
     <details class="panel"><summary>백업·내보내기</summary><div class="actions">
       <button data-export="all:json">전체 JSON</button><button data-export="all:csv">글 CSV</button><button data-export="public:json">공개 JSON</button><button id="sync-public">기존 승인 글 반영</button></div></details>`;
   $('#new-letter').onclick = () => letterEditor();
-  $('#reload').onclick = renderTab;
+  $('#reload').onclick = () => renderTab(true);
   $('#letter-filter').onsubmit = (event) => {
     event.preventDefault();
     letterFilter = data(event.currentTarget);
@@ -510,7 +576,7 @@ async function recordsView() {
     <div class="table-scroll" id="result-list"></div><div class="actions" id="pagination"></div>
     <details class="panel"><summary>기기 백업</summary><p id="pending-count"></p><div class="actions"><button id="sync-pending">미전송 기록 접수</button><button id="local-json">기기 JSON</button><button id="import-results">기록 파일 불러오기</button><input id="result-file" type="file" accept=".json,application/json" hidden /></div></details>`;
   $('#new-result').onclick = () => resultEditor();
-  $('#reload').onclick = renderTab;
+  $('#reload').onclick = () => renderTab(true);
   $('#result-filter').onsubmit = (event) => {
     event.preventDefault();
     resultFilter = data(event.currentTarget);
@@ -768,15 +834,21 @@ function studentsView() {
       ['3', '3학년'],
       ['other', '그 외'],
     ])}
-    <button>검색</button><button id="reload-students" type="button">새로고침</button></form><div class="table-scroll" id="student-list"></div>
+    ${checkbox('unlinkedOnly', '미연결만', studentFilter.unlinkedOnly)}
+    <button>검색</button><button id="reload-students" type="button">새로고침</button></form><p id="student-links" class="muted"></p><div class="table-scroll" id="student-list"></div>
     <div class="actions" id="pagination"></div><div id="student-detail"></div>`;
   $('#student-filter').onsubmit = (event) => {
     event.preventDefault();
-    studentFilter = data(event.currentTarget);
+    studentFilter = {
+      ...data(event.currentTarget),
+      unlinkedOnly: event.currentTarget.elements.unlinkedOnly.checked,
+    };
     studentPage = 1;
     renderStudents();
   };
-  $('#reload-students').onclick = renderTab;
+  $('#student-filter [name=unlinkedOnly]').onchange = () =>
+    $('#student-filter').requestSubmit();
+  $('#reload-students').onclick = () => renderTab(true);
   renderStudents();
 }
 function renderStudents() {
@@ -784,6 +856,7 @@ function renderStudents() {
   const filtered = students.filter((student) => {
     const grade = studentGrade(student, sessionPolicy.academicYear);
     return (
+      (!studentFilter.unlinkedOnly || !student.login_id) &&
       `${student.login_id ?? ''} ${student.student_id} ${student.student_name}`
         .toLocaleLowerCase()
         .includes(query) &&
@@ -793,6 +866,9 @@ function renderStudents() {
           : grade === Number(studentFilter.grade)))
     );
   });
+  const linked = students.filter((student) => !!student.login_id).length;
+  $('#student-links').textContent =
+    `전체 ${students.length}명 · 연결 ${linked}명 · 미연결 ${students.length - linked}명`;
   studentPage = Math.min(studentPage, Math.max(1, Math.ceil(filtered.length / 50)));
   $('#student-list').innerHTML =
     `<table><caption>${filtered.length}명 · ${sessionPolicy.academicYear}학년도</caption>
@@ -867,10 +943,10 @@ async function studentDetail(studentId, relatedLetterId = '') {
     until.disabled = event.currentTarget.value !== 'block_write';
   });
   submit($('#student-moderation'), async (values) => {
+    const operatorUid = session.uid;
     const saved = await moderateStudent(studentId, values);
-    students = students.map((item) =>
-      item.student_id === studentId ? { ...saved, id: studentId } : item,
-    );
+    if (!session.authenticated || session.uid !== operatorUid) return false;
+    updateStudentRoster(studentId, saved);
     renderStudents();
     await studentDetail(studentId);
     setStatus('학생 상태 저장 완료');

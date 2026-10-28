@@ -51,10 +51,6 @@ h3 {
   max-width: 400px;
   margin: 40px auto;
 }
-.login-panel [aria-pressed='true'] {
-  background: #e9eff9;
-  border-color: #174a91;
-}
 label {
   display: block;
   margin: 12px 0 6px;
