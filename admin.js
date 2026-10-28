@@ -46,6 +46,18 @@ import {
   listLocalResults,
   resultsCsv,
 } from './typing/storage.js';
+import {
+  readStudents,
+  readStudentHistory,
+  moderateStudent,
+  studentGrade,
+  writeRestricted,
+  readSessionPolicy,
+  saveSessionPolicy,
+  resetStudentPassword,
+  canResetStudentPassword,
+  DEFAULT_SESSION_POLICY,
+} from './students.js';
 
 const root = document.querySelector('#admin');
 const feature = document.body.dataset.feature;
@@ -60,6 +72,11 @@ let viewSequence = 0;
 let letters = [];
 let results = [];
 let challenges = [];
+let students = [];
+let sessionPolicy = { ...DEFAULT_SESSION_POLICY };
+let studentFilter = { query: '', grade: '' };
+let studentPage = 1;
+let studentDetailSequence = 0;
 let config;
 let letterPage = 1;
 let resultPage = 1;
@@ -111,6 +128,7 @@ function applySession(next) {
     letters = [];
     results = [];
     challenges = [];
+    students = [];
     config = undefined;
     if (!$('#login')) showLogin();
   } else if (entering) showAdmin();
@@ -121,6 +139,7 @@ function sessionFailed(reason) {
   letters = [];
   results = [];
   challenges = [];
+  students = [];
   config = undefined;
   showLogin(errorMessage(reason));
 }
@@ -217,7 +236,7 @@ function showLogin(error = '') {
 function showAdmin() {
   root.innerHTML = `<header class="page-header"><h1>${featureTitle}</h1><a href="${html(localHref('../'))}">돌아가기</a></header>${managementLinks()}
     <div class="section-top"><span id="identity">${html(session.email)}</span><button id="logout">로그아웃</button></div>
-    <nav class="admin-nav" aria-label="관리자 메뉴"><a href="#${firstTab}">${feature === 'typing' ? '타자 기록' : '글'}</a><a href="#settings">설정</a><a href="#account">계정</a></nav>
+    <nav class="admin-nav" aria-label="관리자 메뉴"><a href="#${firstTab}">${feature === 'typing' ? '타자 기록' : '글'}</a><a href="#students">학생</a><a href="#settings">설정</a><a href="#account">계정</a></nav>
     <p id="status" role="status" hidden></p><div id="view"></div>`;
   $('#logout').onclick = () =>
     void run(async () => {
@@ -234,7 +253,7 @@ async function renderTab() {
   if (!session.authenticated || !confirmDiscard()) return;
   const sequence = ++viewSequence;
   renderedHash = location.hash;
-  const tab = ['settings', 'account', firstTab].includes(location.hash.slice(1))
+  const tab = ['settings', 'account', 'students', firstTab].includes(location.hash.slice(1))
     ? location.hash.slice(1)
     : firstTab;
   document.querySelectorAll('.admin-nav a').forEach((link) => {
@@ -252,7 +271,12 @@ async function renderTab() {
     if (tab === 'letters') loaded = await readLetters(db);
     if (tab === 'records') loaded = await Promise.all([readTyping(db), readChallenges(db)]);
     if (tab === 'settings')
-      loaded = await Promise.all([readEvent(db).catch(() => null), readChallenges(db)]);
+      loaded = await Promise.all([
+        readEvent(db).catch(() => null),
+        readChallenges(db),
+        readSessionPolicy(db),
+      ]);
+    if (tab === 'students') loaded = await Promise.all([readStudents(db), readSessionPolicy(db)]);
     if (sequence !== viewSequence) return;
     if (tab === 'letters') {
       letters = loaded;
@@ -261,8 +285,11 @@ async function renderTab() {
       [results, challenges] = loaded;
       await recordsView();
     } else if (tab === 'settings') {
-      [config, challenges] = loaded;
+      [config, challenges, sessionPolicy] = loaded;
       settingsView();
+    } else if (tab === 'students') {
+      [students, sessionPolicy] = loaded;
+      studentsView();
     } else await accountView(db, sequence);
   } catch (reason) {
     if (sequence === viewSequence) {
@@ -647,6 +674,160 @@ function resultEditor(result) {
   });
 }
 
+function studentsView() {
+  studentDetailSequence++;
+  $('#view').innerHTML = `<form id="student-filter" class="toolbar">
+    ${field('query', '학번·이름 검색', studentFilter.query)}
+    ${select('grade', '학년', studentFilter.grade, [
+      ['', '전체'],
+      ['1', '1학년'],
+      ['2', '2학년'],
+      ['3', '3학년'],
+      ['other', '그 외'],
+    ])}
+    <button>검색</button><button id="reload-students" type="button">새로고침</button></form><div class="table-scroll" id="student-list"></div>
+    <div class="actions" id="pagination"></div><div id="student-detail"></div>`;
+  $('#student-filter').onsubmit = (event) => {
+    event.preventDefault();
+    studentFilter = data(event.currentTarget);
+    studentPage = 1;
+    renderStudents();
+  };
+  $('#reload-students').onclick = renderTab;
+  renderStudents();
+}
+function renderStudents() {
+  const query = normalizeText(studentFilter.query).toLocaleLowerCase();
+  const filtered = students.filter((student) => {
+    const grade = studentGrade(student, sessionPolicy.academicYear);
+    return (
+      `${student.student_id} ${student.student_name}`.toLocaleLowerCase().includes(query) &&
+      (!studentFilter.grade ||
+        (studentFilter.grade === 'other' ? grade === null : grade === Number(studentFilter.grade)))
+    );
+  });
+  studentPage = Math.min(studentPage, Math.max(1, Math.ceil(filtered.length / 50)));
+  $('#student-list').innerHTML =
+    `<table><caption>${filtered.length}명 · ${sessionPolicy.academicYear}학년도</caption>
+    <thead><tr><th>학번</th><th>이름</th><th>학년</th><th>계정</th><th>글 작성</th><th>관리</th></tr></thead><tbody>${filtered
+      .slice((studentPage - 1) * 50, studentPage * 50)
+      .map(
+        (student) => `<tr>
+      <td>${html(student.student_id)}</td><td>${html(student.student_name)}</td>
+      <td>${studentGrade(student, sessionPolicy.academicYear) ?? '—'}</td>
+      <td>${student.is_active ? '활성' : '비활성'}</td><td>${writeRestricted(student) ? '제한' : '허용'}</td>
+      <td><button data-student="${html(student.student_id)}">상세</button></td></tr>`,
+      )
+      .join('')}</tbody></table>`;
+  document.querySelectorAll('[data-student]').forEach((button) => {
+    button.onclick = () => {
+      if (!confirmDiscard($('#student-detail'))) return;
+      void studentDetail(button.dataset.student).catch(alertError);
+    };
+  });
+  paginate(filtered.length, 50, studentPage, (page) => {
+    studentPage = page;
+    renderStudents();
+  });
+}
+const moderationLabels = {
+  block_write: '글 작성 제한',
+  unblock_write: '글 작성 제한 해제',
+  deactivate: '계정 비활성화',
+  activate: '계정 재활성화',
+  reset_password: '비밀번호 재발급',
+};
+async function studentDetail(studentId) {
+  const detailSequence = ++studentDetailSequence;
+  const sequence = viewSequence;
+  const student = students.find((item) => item.student_id === studentId);
+  if (!student) throw new Error('학생 정보를 찾지 못했습니다. 새로 불러오세요.');
+  const container = $('#student-detail');
+  container.innerHTML = `<section class="panel"><h2>${html(student.student_id)} ${html(student.student_name)}</h2>
+    <p>${student.is_active ? '활성' : '비활성'} · 글 작성 ${writeRestricted(student) ? '제한' : '허용'}${student.blocked_until ? ` · 제한 종료 ${html(koreanDate(student.blocked_until.toDate().toISOString()))}` : ''}</p>
+    <div id="student-actions">불러오는 중</div><div id="student-history"></div></section>`;
+  container.scrollIntoView({ block: 'start' });
+  const { db } = await adminContext();
+  const history = await readStudentHistory(db, studentId);
+  const passwordReady = await canResetStudentPassword();
+  if (
+    sequence !== viewSequence ||
+    detailSequence !== studentDetailSequence ||
+    !session.authenticated
+  )
+    return;
+  $('#student-actions').innerHTML = `<form id="student-moderation">
+    ${select('action', '조치', student.write_blocked ? 'unblock_write' : 'block_write', [
+      ['block_write', '글 작성 제한'],
+      ['unblock_write', '글 작성 제한 해제'],
+      [
+        student.is_active ? 'deactivate' : 'activate',
+        student.is_active ? '계정 비활성화' : '계정 재활성화',
+      ],
+    ])}
+    ${field('blocked_until', '제한 종료 (비워두면 직접 해제)', '', 'datetime-local')}
+    ${select('related_letter_id', '관련 글', '', [['', '없음'], ...history.letters.map((letter) => [letter.id, `${koreanDate(letter.created_at?.toDate().toISOString() ?? '')} · ${letter.id}`])])}
+    ${area('reason', '조치 사유', '', 3)}<button>적용</button></form>
+    <form id="student-password"><h3>비밀번호 재발급</h3>${area('reason', '재발급 사유', '', 2)}<button${passwordReady ? '' : ' disabled'}>임시 비밀번호 발급</button>${passwordReady ? '' : '<p class="muted">비밀번호 재발급은 현재 보류 중입니다.</p>'}
+    <p id="temporary-password" role="status" hidden></p><button id="clear-temporary-password" type="button" hidden>임시 비밀번호 숨기기</button></form>`;
+  for (const form of [$('#student-moderation'), $('#student-password')]) {
+    form.elements.reason.required = true;
+    form.elements.reason.maxLength = 500;
+  }
+  const until = $('#student-moderation').elements.blocked_until;
+  until.disabled = student.write_blocked;
+  $('#student-moderation').elements.action.addEventListener('change', (event) => {
+    until.disabled = event.currentTarget.value !== 'block_write';
+  });
+  submit($('#student-moderation'), async (values) => {
+    const saved = await moderateStudent(studentId, values);
+    students = students.map((item) =>
+      item.student_id === studentId ? { ...saved, id: studentId } : item,
+    );
+    renderStudents();
+    await studentDetail(studentId);
+    setStatus('학생 상태 저장 완료');
+  });
+  submit($('#student-password'), async (values) => {
+    const result = await resetStudentPassword(studentId, values.reason);
+    const output = $('#temporary-password');
+    if (sequence !== viewSequence || detailSequence !== studentDetailSequence || !output) return;
+    output.textContent = `임시 비밀번호: ${result.password}`;
+    output.hidden = false;
+    $('#clear-temporary-password').hidden = false;
+    $('#student-password').reset();
+    setStatus('임시 비밀번호 재발급 완료');
+  });
+  $('#clear-temporary-password').onclick = () => {
+    $('#temporary-password').textContent = '';
+    $('#temporary-password').hidden = true;
+    $('#clear-temporary-password').hidden = true;
+  };
+  $('#student-history').innerHTML = `<h3>작성 내역</h3>${
+    history.letters.length
+      ? history.letters
+          .map(
+            (letter) => `<article class="record">
+    <strong>${html(labels[letter.status] ?? letter.status)}</strong> · ${html(koreanDate(letter.created_at?.toDate().toISOString() ?? ''))}
+    <p class="letter-content">${html(letter.content)}</p><small>접수번호 ${html(letter.id)} · 별명 ${html(letter.nickname || '익명')}</small></article>`,
+          )
+          .join('')
+      : '<p>작성 내역 없음</p>'
+  }
+    <h3>관리 기록</h3>${
+      history.logs.length
+        ? history.logs
+            .map(
+              (
+                log,
+              ) => `<article class="record"><strong>${html(moderationLabels[log.action] ?? log.action)}</strong> · ${html(koreanDate(log.created_at?.toDate().toISOString() ?? ''))}
+    <p>${html(log.reason)}</p><small>관리자 ${html(log.operator_uid)}${log.related_letter_id ? ` · 관련 글 ${html(log.related_letter_id)}` : ''}</small></article>`,
+            )
+            .join('')
+        : '<p>관리 기록 없음</p>'
+    }`;
+}
+
 function settingsView() {
   $('#view').innerHTML = `<form class="panel" id="event-settings"><h2>운영 설정</h2>
     ${select('phase', '단계', config?.phase ?? 'B', [
@@ -664,6 +845,11 @@ function settingsView() {
         .map((item) => [item.challengeId, item.title]),
     )}
     <p class="muted">접수는 A 단계에서만 가능합니다.</p><button>저장</button></form>
+    <form class="panel" id="session-policy"><h2>학생 로그인 설정</h2>
+    ${checkbox('boothMode', '공용 기기 모드', sessionPolicy.boothMode)}
+    ${field('idleMinutes', '미사용 로그아웃 (분)', sessionPolicy.idleMinutes, 'number', 'required min="1" max="120" step="1"')}
+    ${field('academicYear', '기준 학년도', sessionPolicy.academicYear, 'number', 'required min="2020" max="2100" step="1"')}
+    <button>저장</button></form>
     ${feature === 'typing' ? '<section class="panel"><h2>문구</h2><button id="new-challenge">추가</button><div id="challenges"></div></section><div id="editor"></div>' : ''}`;
   submit($('#event-settings'), async (values) => {
     await setEvent((await adminContext()).db, values.phase, {
@@ -675,6 +861,12 @@ function settingsView() {
     setStatus('저장 완료');
     config = await readEvent((await adminContext()).db);
     if (feature === 'typing') renderChallenges();
+  });
+  submit($('#session-policy'), async (values) => {
+    const { db } = await adminContext();
+    await saveSessionPolicy(db, { ...values, boothMode: !!values.boothMode });
+    sessionPolicy = await readSessionPolicy(db);
+    setStatus('로그인 설정 저장 완료');
   });
   if (feature !== 'typing') return;
   $('#new-challenge').onclick = () => challengeEditor();

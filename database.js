@@ -86,6 +86,7 @@ async function createOnce(db, uid, id, kind, payload) {
   );
 }
 export async function submitLetter(db, uid, input) {
+  await submissionStudent(db, uid, true);
   const { value, error } = validateSubmission(input);
   if (!value) throw new ClientError(error, 400, 'VALIDATION_FAILED');
   const payload = {
@@ -119,7 +120,26 @@ export function validateTypingResult(input, challenge = CHALLENGE) {
   if (input.speed !== computed.speed || input.score !== computed.score)
     throw new ClientError('타수와 최종 점수 계산이 일치하지 않습니다.', 400, 'INVALID_SCORE');
 }
-export async function submitTyping(db, uid, result) {
+async function submissionStudent(db, uid, writing = false) {
+  if (!/^[0-9]{7}$/.test(uid)) throw new ClientError('학생 로그인이 필요합니다.', 401);
+  const snapshot = await withDeadline(getDoc(doc(db, 'students', uid)));
+  const student = snapshot.data();
+  if (student?.student_id !== uid || student?.is_active !== true)
+    throw new ClientError('계정을 사용할 수 없습니다. 운영진에게 문의하세요.', 403);
+  if (
+    writing &&
+    student.write_blocked &&
+    (!student.blocked_until || student.blocked_until.toMillis() > Date.now())
+  )
+    throw new ClientError('글 작성이 제한된 계정입니다. 운영진에게 문의하세요.', 403);
+  return student;
+}
+export async function submitTyping(db, uid, result, { asAdmin = false } = {}) {
+  if (!asAdmin) {
+    const student = await submissionStudent(db, uid);
+    if (result.participantId !== uid || result.displayName !== student.student_name)
+      throw new ClientError('로그인 계정과 참가 정보가 일치하지 않습니다.', 403);
+  }
   validateTypingResult(result, await readChallenge(db, result.challengeId));
   const payload = {
     id: result.id,

@@ -1,31 +1,41 @@
-import { loginAdmin, errorMessage } from './firebase.js';
+import {
+  loginAdmin,
+  loginStudent,
+  logoutStudent,
+  getClients,
+  watchStudentSession,
+  watchSessionPolicy,
+  errorMessage,
+} from './firebase.js';
 import { escapeHtml as html, localHref } from './common.js';
 
-const sessionKey = `student:${new URL('.', import.meta.url).pathname}`;
-
-export function studentIdentity(studentId, name) {
-  const id = String(studentId ?? '')
+export function loginKind(value) {
+  const id = String(value ?? '')
     .normalize('NFKC')
     .trim();
-  const value = String(name ?? '')
-    .normalize('NFC')
-    .trim();
-  if (!/^\d{4,10}$/.test(id)) throw new Error('학번은 숫자 4~10자리로 입력하세요.');
-  if (!value || Array.from(value).length > 30 || /[\p{Cc}\p{Cf}]/u.test(value))
-    throw new Error('이름은 1~30자로 입력하세요.');
-  return { studentId: id, name: value };
+  if (/^[0-9]{7}$/.test(id)) return { kind: 'student', id };
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) return { kind: 'admin', id };
+  throw new Error('학번 7자리 또는 이메일을 입력하세요.');
 }
 
-export function mountLogin({ container, adminPath, onStudent, onLogout, canLogout = () => true }) {
+export function mountLogin({
+  container,
+  adminPath,
+  onStudent,
+  onLogout,
+  canLogout = () => true,
+  canAutoLogout = () => true,
+}) {
   let student = null;
-  let admin = false;
   let busy = false;
+  let policy = { boothMode: true, idleMinutes: 10 };
+  let lastActivity = Date.now();
+  let reason = '';
+  let setupPromise;
   container.innerHTML = `<section id="login-panel" class="panel login-panel">
-    <h2>로그인</h2>
-    <div class="actions" aria-label="로그인 종류"><button id="student-mode" type="button" aria-pressed="true">학생</button><button id="admin-mode" type="button" aria-pressed="false">관리자</button></div>
-    <form id="entry-form">
-      <label><span id="identity-label">학번</span><input name="identity" required inputmode="numeric" maxlength="10" autocomplete="off" /></label>
-      <label><span id="credential-label">이름</span><input name="credential" required maxlength="30" autocomplete="off" /></label>
+    <h2>로그인</h2><form id="entry-form">
+      <label>학번 또는 이메일<input name="identity" required maxlength="254" autocomplete="username" /></label>
+      <label>비밀번호<input name="credential" type="password" required maxlength="4096" autocomplete="current-password" /></label>
       <p id="login-error" class="error" role="alert" hidden></p>
       <button type="submit">로그인</button>
     </form>
@@ -35,98 +45,129 @@ export function mountLogin({ container, adminPath, onStudent, onLogout, canLogou
   const $ = (selector) => container.querySelector(selector);
   const form = $('#entry-form');
   const error = $('#login-error');
-  function showStudent(value) {
+  function failure(value) {
+    error.textContent = errorMessage(value);
+    error.hidden = false;
+  }
+  function lock(value) {
+    busy = value;
+    container.setAttribute('aria-busy', String(value));
+    container.querySelectorAll('input, button').forEach((control) => {
+      control.disabled = value;
+    });
+  }
+  function show(value) {
+    const previous = student;
     student = value;
-    $('#login-panel').hidden = true;
-    $('#student-session').hidden = false;
-    $('#student-name').textContent = `${value.studentId} ${value.name}`;
-    onStudent({ ...value });
+    $('#login-panel').hidden = !!value;
+    $('#student-session').hidden = !value;
+    $('#student-name').textContent = value ? `${value.studentId} ${value.name}` : '';
+    if (value) {
+      lastActivity = Date.now();
+      onStudent({ ...value });
+    } else if (previous) {
+      form.reset();
+      onLogout(reason);
+      reason = '';
+    }
   }
-  function setMode(isAdmin) {
-    if (busy) return;
-    admin = isAdmin;
-    form.reset();
-    error.hidden = true;
-    $('#student-mode').setAttribute('aria-pressed', String(!admin));
-    $('#admin-mode').setAttribute('aria-pressed', String(admin));
-    $('#identity-label').textContent = admin ? '이메일' : '학번';
-    $('#credential-label').textContent = admin ? '비밀번호' : '이름';
-    form.elements.identity.type = admin ? 'email' : 'text';
-    form.elements.identity.inputMode = admin ? 'email' : 'numeric';
-    form.elements.identity.maxLength = admin ? 254 : 10;
-    form.elements.identity.autocomplete = admin ? 'username' : 'off';
-    form.elements.credential.type = admin ? 'password' : 'text';
-    form.elements.credential.maxLength = admin ? 4096 : 30;
-    form.elements.credential.autocomplete = admin ? 'current-password' : 'off';
-    $('#admin-help').hidden = true;
-    form.elements.identity.focus();
+  async function setup() {
+    if (!setupPromise)
+      setupPromise = (async () => {
+        const clients = await getClients();
+        policy = clients.policy;
+        // 이전의 본인 확인 없는 입력 세션은 복원하지 않습니다.
+        try {
+          sessionStorage.removeItem(`student:${new URL('.', import.meta.url).pathname}`);
+        } catch {
+          /* 선택 저장소 */
+        }
+        await watchStudentSession(show, failure);
+        await watchSessionPolicy((value) => {
+          policy = value;
+        }, failure);
+      })().catch((value) => {
+        setupPromise = null;
+        throw value;
+      });
+    return setupPromise;
   }
-  $('#student-mode').addEventListener('click', () => setMode(false));
-  $('#admin-mode').addEventListener('click', () => setMode(true));
+  async function logout({ force = false, cause = '' } = {}) {
+    if (busy || (!force && !canLogout())) return false;
+    lock(true);
+    reason = cause;
+    try {
+      await logoutStudent();
+      show(null);
+      return true;
+    } catch (value) {
+      failure(value);
+      return false;
+    } finally {
+      lock(false);
+    }
+  }
   form.addEventListener('submit', async (event) => {
     event.preventDefault();
     if (busy) return;
     const values = new FormData(form);
-    busy = true;
+    let account;
+    lock(true);
     error.hidden = true;
     $('#admin-help').hidden = true;
-    container.setAttribute('aria-busy', 'true');
-    container.querySelectorAll('input, button').forEach((control) => {
-      control.disabled = true;
-    });
     try {
-      if (admin) {
-        await loginAdmin(values.get('identity'), values.get('credential'));
+      account = loginKind(values.get('identity'));
+      await setup();
+      if (account.kind === 'admin') {
+        await logoutStudent();
+        await loginAdmin(account.id, values.get('credential'));
         form.reset();
         location.assign(localHref(adminPath));
       } else {
-        const value = studentIdentity(values.get('identity'), values.get('credential'));
-        try {
-          sessionStorage.setItem(sessionKey, JSON.stringify(value));
-        } catch {
-          /* 탭의 메모리 세션을 사용합니다. */
-        }
+        const profile = await loginStudent(account.id, values.get('credential'));
         form.reset();
-        showStudent(value);
+        show(profile);
       }
-    } catch (reason) {
-      error.textContent = errorMessage(reason);
-      error.hidden = false;
-      if (admin) {
-        form.elements.credential.value = '';
-        $('#admin-help').hidden = false;
-      }
+    } catch (value) {
+      failure(value);
+      form.elements.credential.value = '';
+      $('#admin-help').hidden = account?.kind !== 'admin';
     } finally {
-      busy = false;
-      container.setAttribute('aria-busy', 'false');
-      container.querySelectorAll('input, button').forEach((control) => {
-        control.disabled = false;
-      });
+      lock(false);
     }
   });
-  $('#student-logout').addEventListener('click', () => {
-    if (busy || !canLogout()) return;
-    student = null;
-    try {
-      sessionStorage.removeItem(sessionKey);
-    } catch {
-      /* 메모리 세션도 비웁니다. */
-    }
-    $('#student-name').textContent = '';
-    $('#student-session').hidden = true;
-    $('#login-panel').hidden = false;
-    setMode(false);
-    onLogout();
+  $('#student-logout').addEventListener('click', () => void logout());
+  for (const event of ['pointerdown', 'keydown', 'touchstart'])
+    document.addEventListener(
+      event,
+      () => {
+        lastActivity = Date.now();
+      },
+      { passive: true },
+    );
+  const timer = setInterval(() => {
+    if (
+      student &&
+      policy.boothMode &&
+      !busy &&
+      Date.now() - lastActivity >= policy.idleMinutes * 60000 &&
+      canAutoLogout()
+    )
+      void logout({ force: true, cause: 'idle' });
+  }, 5000);
+  window.addEventListener('pagehide', () => {
+    clearInterval(timer);
   });
-  try {
-    const saved = JSON.parse(sessionStorage.getItem(sessionKey));
-    if (saved) showStudent(studentIdentity(saved.studentId, saved.name));
-  } catch {
-    try {
-      sessionStorage.removeItem(sessionKey);
-    } catch {
-      /* 저장 공간을 사용할 수 없습니다. */
-    }
-  }
-  return { current: () => (student ? { ...student } : null) };
+  window.addEventListener('pageshow', (event) => {
+    if (event.persisted) location.reload();
+  });
+  lock(true);
+  void setup()
+    .catch(failure)
+    .finally(() => lock(false));
+  return {
+    current: () => (student ? { ...student } : null),
+    policy: () => ({ ...policy }),
+    logout,
+  };
 }

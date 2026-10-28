@@ -44,6 +44,7 @@ let elapsed = 0;
 let result = null;
 let spans = [];
 let timer = null;
+let sessionVersion = 0;
 
 function message(text, isError = false) {
   elements.feedback.textContent = text;
@@ -155,15 +156,19 @@ function beginTiming() {
 async function persist(record) {
   if (saving) return;
   saving = true;
+  const version = sessionVersion;
   transition('saving');
   message('기록 저장 중');
   try {
     await saveResult(record);
+    if (version !== sessionVersion) return;
     transition('saved');
     message('저장 완료');
   } catch (reason) {
-    transition('failed');
-    message(errorMessage(reason), true);
+    if (version === sessionVersion) {
+      transition('failed');
+      message(errorMessage(reason), true);
+    }
   } finally {
     saving = false;
   }
@@ -184,6 +189,7 @@ function process(value, endedComposition = false) {
     id: crypto.randomUUID(),
     participantId: participant.studentId,
     displayName: participant.name,
+    owner_uid: participant.uid,
     challengeId: attempt.challengeId,
     elapsedMs: elapsed,
     ...calculateScore(attempt.referenceKeystrokes, elapsed, engine.errors),
@@ -208,8 +214,10 @@ function invalidate(reason) {
 elements['start-form'].addEventListener('submit', async (event) => {
   event.preventDefault();
   if (!participant || loading || status !== 'ready') return;
+  const version = sessionVersion;
   try {
     const current = await refresh();
+    if (version !== sessionVersion) return;
     if (!current.config.typingEnabled || !current.challenge.enabled || current.challenge.deleted) {
       message('현재 접수할 수 없습니다.', true);
       return;
@@ -290,10 +298,12 @@ mountLogin({
   container: document.querySelector('#login'),
   adminPath: './admin/',
   onStudent(student) {
+    const entering = !participant || participant.uid !== student.uid;
+    if (entering) sessionVersion++;
     participant = student;
     document.querySelector('#student-view').hidden = false;
     updateControls();
-    void refresh().catch(() => {});
+    if (entering) void refresh().catch(() => {});
   },
   canLogout() {
     if (loading || saving) return false;
@@ -301,7 +311,11 @@ mountLogin({
       return confirm('진행 중인 기록을 닫고 로그아웃할까요?');
     return true;
   },
+  canAutoLogout() {
+    return !loading && !saving && !['armed', 'running'].includes(status);
+  },
   onLogout() {
+    sessionVersion++;
     participant = null;
     document.querySelector('#student-view').hidden = true;
     clearAttempt();

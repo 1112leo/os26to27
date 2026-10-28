@@ -7,6 +7,9 @@
 !/welcome/**
 !/admin.js
 !/login.js
+!/students.js
+!/scripts/
+!/scripts/**
 !/common.js
 !/database.js
 !/firebase.js
@@ -28,5 +31,14 @@
 **/*.spec.*
 **/*.log
 **/.env*
+**/.secret*
+**/*roster*.json
+**/*report*.json
+**/*.pdf
+**/*.xlsx
+**/*.sql
+**/*student*.csv
+**/*student*.json
+**/*credential*.json
 **/service-account*.json
 **/*-adminsdk-*.json

@@ -7,7 +7,6 @@ import {
   browserSessionPersistence,
   connectAuthEmulator,
   initializeAuth,
-  signInAnonymously,
   onIdTokenChanged,
   signInWithEmailAndPassword,
   signOut,
@@ -19,6 +18,7 @@ import {
   createUserWithEmailAndPassword,
   deleteUser,
   inMemoryPersistence,
+  setPersistence,
 } from 'https://www.gstatic.com/firebasejs/13.1.0/firebase-auth.js';
 import {
   connectFirestoreEmulator,
@@ -27,6 +27,7 @@ import {
   getDoc,
   setDoc,
   serverTimestamp,
+  onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/13.1.0/firebase-firestore.js';
 export class ClientError extends Error {
   constructor(message, status = 0, code = 'UNKNOWN') {
@@ -42,9 +43,14 @@ export function firebaseError(error) {
   if (
     code.includes('invalid-credential') ||
     code.includes('wrong-password') ||
+    code.includes('user-disabled') ||
     code.includes('user-not-found')
   )
-    return new ClientError('이메일 또는 비밀번호를 확인해 주세요.', 401, code);
+    return new ClientError(
+      '아이디 또는 비밀번호를 확인해 주세요. 등록 문의는 운영진에게 해 주세요.',
+      401,
+      code,
+    );
   if (code.includes('too-many-requests'))
     return new ClientError('로그인 요청이 많습니다. 잠시 후 다시 시도해 주세요.', 429, code);
   if (code.includes('weak-password') || code.includes('password-does-not-meet-requirements'))
@@ -68,11 +74,7 @@ export function firebaseError(error) {
       code,
     );
   if (code.includes('operation-not-allowed'))
-    return new ClientError(
-      'Firebase에서 익명 인증과 이메일/비밀번호 인증을 활성화해 주세요.',
-      503,
-      code,
-    );
+    return new ClientError('Firebase에서 이메일/비밀번호 인증을 활성화해 주세요.', 503, code);
   if (code.includes('unavailable') || code.includes('network') || code.includes('deadline'))
     return new ClientError(
       'Firebase에 연결하지 못했습니다. 입력 내용은 유지되며 같은 요청으로 재시도할 수 있습니다.',
@@ -112,7 +114,6 @@ export async function withDeadline(promise, milliseconds = 20000) {
 }
 export const errorMessage = (error) => firebaseError(error).message;
 let clients = null;
-let anonymousLogin = null;
 async function initialize() {
   const emulator =
     ['localhost', '127.0.0.1'].includes(location.hostname) &&
@@ -178,11 +179,29 @@ async function initialize() {
       }),
     );
   }
+  const policySnapshot = await withDeadline(
+    getDoc(doc(deviceDb, 'settings', 'sessionPolicy')),
+  ).catch(() => null);
+  const policy = sessionPolicy(policySnapshot?.data());
+  const studentApp = initializeApp(config, `ohsung-student-${suffix}`);
+  const studentAuth = initializeAuth(studentApp, { persistence: browserSessionPersistence });
+  if (emulator)
+    connectAuthEmulator(studentAuth, 'http://127.0.0.1:9098', { disableWarnings: true });
+  const studentDb = getFirestore(studentApp);
+  if (emulator) connectFirestoreEmulator(studentDb, '127.0.0.1', 8088);
+  await studentAuth.authStateReady();
+  if (policy.boothMode) {
+    await setPersistence(studentAuth, inMemoryPersistence);
+    await signOut(studentAuth);
+  }
   return {
     deviceAuth,
     adminAuth,
     deviceDb,
     adminDb,
+    studentAuth,
+    studentDb,
+    policy,
     emulator,
     projectId: config.projectId,
   };
@@ -196,23 +215,148 @@ export function getClients() {
   return clients;
 }
 export async function deviceIdentity() {
-  const { deviceAuth, deviceDb } = await getClients();
-  await deviceAuth.authStateReady();
-  if (deviceAuth.currentUser)
-    return {
-      uid: deviceAuth.currentUser.uid,
-      db: deviceDb,
-    };
-  if (!anonymousLogin)
-    anonymousLogin = withDeadline(
-      signInAnonymously(deviceAuth).then((result) => result.user.uid),
-    ).finally(() => {
-      anonymousLogin = null;
-    });
+  return studentContext();
+}
+
+export function sessionPolicy(data) {
   return {
-    uid: await anonymousLogin,
-    db: deviceDb,
+    boothMode: data?.boothMode !== false,
+    idleMinutes:
+      Number.isInteger(data?.idleMinutes) && data.idleMinutes >= 1 && data.idleMinutes <= 120
+        ? data.idleMinutes
+        : 10,
+    academicYear: Number.isInteger(data?.academicYear) ? data.academicYear : 2026,
   };
+}
+export function studentEmail(studentId, projectId) {
+  if (!/^[0-9]{7}$/.test(studentId)) throw new ClientError('학번은 숫자 7자리로 입력하세요.', 400);
+  return `${studentId}@students.${projectId}.invalid`;
+}
+function studentProfile(user, data, projectId) {
+  if (
+    !user ||
+    user.isAnonymous ||
+    !/^[0-9]{7}$/.test(user.uid) ||
+    user.email !== studentEmail(user.uid, projectId) ||
+    data?.student_id !== user.uid ||
+    data?.is_active !== true ||
+    typeof data.student_name !== 'string'
+  )
+    throw new ClientError(
+      '계정을 사용할 수 없습니다. 운영진에게 문의하세요.',
+      403,
+      'STUDENT_UNAVAILABLE',
+    );
+  return {
+    uid: user.uid,
+    studentId: user.uid,
+    name: data.student_name,
+    admissionYear: data.admission_year,
+    writeBlocked:
+      data.write_blocked === true &&
+      (!data.blocked_until || data.blocked_until.toMillis() > Date.now()),
+    blockedUntil: data.blocked_until ?? null,
+  };
+}
+export async function studentSession() {
+  const clients = await getClients();
+  await clients.studentAuth.authStateReady();
+  const user = clients.studentAuth.currentUser;
+  if (!user) return null;
+  const record = await withDeadline(getDoc(doc(clients.studentDb, 'students', user.uid)));
+  return studentProfile(user, record.data(), clients.projectId);
+}
+export async function loginStudent(id, password) {
+  const clients = await getClients();
+  await clients.policyTransition;
+  await signOut(clients.adminAuth);
+  await signOut(clients.studentAuth);
+  try {
+    const { user } = await withDeadline(
+      signInWithEmailAndPassword(
+        clients.studentAuth,
+        studentEmail(id, clients.projectId),
+        password,
+      ),
+    );
+    if (user.uid !== id)
+      throw new ClientError('계정을 사용할 수 없습니다. 운영진에게 문의하세요.', 403);
+    return await studentSession();
+  } catch (reason) {
+    await signOut(clients.studentAuth);
+    throw firebaseError(reason);
+  }
+}
+export async function logoutStudent() {
+  await signOut((await getClients()).studentAuth);
+}
+export async function studentContext({ writing = false } = {}) {
+  const student = await studentSession();
+  if (!student) throw new ClientError('로그인이 필요합니다.', 401, 'STUDENT_LOGIN_REQUIRED');
+  if (writing && student.writeBlocked)
+    throw new ClientError(
+      '글 작성이 제한된 계정입니다. 운영진에게 문의하세요.',
+      403,
+      'WRITE_BLOCKED',
+    );
+  return { ...student, db: (await getClients()).studentDb };
+}
+export async function watchStudentSession(onChange, onError) {
+  const clients = await getClients();
+  let stopProfile = () => {};
+  let sequence = 0;
+  const stopAuth = onIdTokenChanged(clients.studentAuth, (user) => {
+    const current = ++sequence;
+    stopProfile();
+    if (!user) {
+      onChange(null);
+      return;
+    }
+    stopProfile = onSnapshot(
+      doc(clients.studentDb, 'students', user.uid),
+      (snapshot) => {
+        if (current !== sequence) return;
+        try {
+          onChange(studentProfile(user, snapshot.data(), clients.projectId));
+        } catch (reason) {
+          void logoutStudent();
+          onError(reason);
+        }
+      },
+      (reason) => {
+        if (current === sequence) {
+          void logoutStudent();
+          onError(reason);
+        }
+      },
+    );
+  });
+  return () => {
+    sequence++;
+    stopProfile();
+    stopAuth();
+  };
+}
+export async function watchSessionPolicy(onChange, onError) {
+  const clients = await getClients();
+  return onSnapshot(
+    doc(clients.deviceDb, 'settings', 'sessionPolicy'),
+    (snapshot) => {
+      const next = sessionPolicy(snapshot.data());
+      const changed = next.boothMode !== clients.policy.boothMode;
+      Object.assign(clients.policy, next);
+      if (changed)
+        clients.policyTransition = (async () => {
+          await setPersistence(
+            clients.studentAuth,
+            next.boothMode ? inMemoryPersistence : browserSessionPersistence,
+          );
+          await logoutStudent();
+        })().catch(onError);
+      onChange(next);
+    },
+    onError,
+  );
 }
 export async function adminSession() {
   const { adminAuth, adminDb } = await getClients();
@@ -244,11 +388,7 @@ export async function loginAdmin(email, password) {
   const session = await adminSession();
   if (!session.authenticated) {
     await signOut(adminAuth);
-    throw new ClientError(
-      `이 계정에 관리자 권한이 없습니다. 운영진이 관리자 UID를 등록해야 합니다. (${session.uid})`,
-      403,
-      'NOT_ADMIN',
-    );
+    throw new ClientError('관리자 권한이 없는 계정입니다.', 403, 'NOT_ADMIN');
   }
   return session;
 }

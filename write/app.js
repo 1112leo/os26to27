@@ -1,15 +1,14 @@
-import { deviceIdentity, errorMessage, getClients } from '../firebase.js';
+import { studentContext, errorMessage, getClients } from '../firebase.js';
 import { readEvent, submitLetter } from '../database.js';
-import { localHref, normalizeText, unicodeLength, validateSubmission } from '../common.js';
-
-document.querySelector('header a').href = localHref('./admin/');
+import { normalizeText, unicodeLength, validateSubmission } from '../common.js';
+import { mountLogin } from '../login.js';
 
 const form = document.querySelector('#write-form');
 const nickname = document.querySelector('#nickname');
 const content = document.querySelector('#content');
 const consent = document.querySelector('#consent');
 const submitButton = document.querySelector('#submit');
-const resetButton = document.querySelector('#reset');
+const resetButton = document.querySelector('#clear-form');
 const error = document.querySelector('#error');
 const eventStatus = document.querySelector('#event-status');
 const retryEvent = document.querySelector('#retry-event');
@@ -24,6 +23,9 @@ let busy = false;
 let accepted = false;
 let config = null;
 let eventRequest = null;
+let student = null;
+let sessionVersion = 0;
+let unblockTimer;
 
 function showError(message = '') {
   error.textContent = message;
@@ -35,7 +37,12 @@ function updateControls() {
   nickname.disabled = locked;
   content.disabled = locked;
   consent.disabled = locked;
-  submitButton.disabled = busy || !!eventRequest || (!pending && !config?.submissionsEnabled);
+  const blocked =
+    student?.writeBlocked &&
+    (!student.blockedUntil || student.blockedUntil.toMillis() > Date.now());
+  submitButton.disabled =
+    !student || blocked || busy || !!eventRequest || (!pending && !config?.submissionsEnabled);
+  if (blocked) eventStatus.textContent = '글 작성이 제한된 계정입니다. 운영진에게 문의하세요.';
   submitButton.textContent = busy ? '제출 중' : pending ? '다시 제출' : '제출';
   resetButton.disabled =
     busy || (!nickname.value && !content.value && !consent.checked && !pending);
@@ -79,7 +86,9 @@ retryEvent.addEventListener('click', () => {
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
-  if (busy) return;
+  if (busy || !student) return;
+  const version = sessionVersion;
+  const expectedUid = student.uid;
   const candidate = pending ?? {
     nickname: nickname.value,
     content: content.value,
@@ -102,10 +111,14 @@ form.addEventListener('submit', async (event) => {
         return;
       }
     }
+    if (version !== sessionVersion) return;
     pending = validated.value;
     updateControls();
-    const { db, uid } = await deviceIdentity();
+    const { db, uid } = await studentContext({ writing: true });
+    if (version !== sessionVersion || uid !== expectedUid)
+      throw new Error('로그인 계정이 변경되었습니다. 다시 입력하세요.');
     const receipt = await submitLetter(db, uid, pending);
+    if (version !== sessionVersion) return;
     accepted = true;
     nickname.value = '';
     content.value = '';
@@ -118,13 +131,9 @@ form.addEventListener('submit', async (event) => {
     retryEvent.hidden = true;
     complete.scrollIntoView({ block: 'start' });
     complete.focus({ preventScroll: true });
-    try {
-      sessionStorage.setItem('ohsung-last-receipt', receipt.id);
-    } catch {
-      /* Optional receipt. */
-    }
+    if (login.policy().boothMode) await login.logout({ force: true, cause: 'submitted' });
   } catch (reason) {
-    showError(errorMessage(reason));
+    if (version === sessionVersion) showError(errorMessage(reason));
   } finally {
     busy = false;
     updateControls();
@@ -159,5 +168,49 @@ window.addEventListener('beforeunload', (event) => {
   }
 });
 
+const login = mountLogin({
+  container: document.querySelector('#login'),
+  adminPath: './admin/',
+  onStudent(profile) {
+    const entering = student?.uid !== profile.uid;
+    student = profile;
+    document.querySelector('#student-view').hidden = false;
+    document.querySelector('#new-letter').hidden = false;
+    clearTimeout(unblockTimer);
+    if (profile.blockedUntil) {
+      const delay = profile.blockedUntil.toMillis() - Date.now();
+      if (delay > 0 && delay < 2147483647) unblockTimer = setTimeout(updateControls, delay + 10);
+    }
+    if (entering) {
+      sessionVersion++;
+      reset();
+    } else updateControls();
+  },
+  canLogout() {
+    if (busy) return false;
+    return (
+      !(pending || content.value || nickname.value || consent.checked) ||
+      confirm('입력한 내용을 닫고 로그아웃할까요?')
+    );
+  },
+  canAutoLogout() {
+    return !busy;
+  },
+  onLogout(cause) {
+    sessionVersion++;
+    student = null;
+    clearTimeout(unblockTimer);
+    form.reset();
+    submissionKey = crypto.randomUUID();
+    pending = null;
+    document.querySelector('#student-view').hidden = true;
+    document.querySelector('#new-letter').hidden = true;
+    if (cause !== 'submitted') {
+      complete.hidden = true;
+      document.querySelector('#receipt').textContent = '';
+    }
+    showError();
+    updateControls();
+  },
+});
 updateControls();
-void checkEvent();

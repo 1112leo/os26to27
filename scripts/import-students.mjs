@@ -1,0 +1,401 @@
+import { readFile, writeFile, realpath, lstat, rename, unlink } from 'node:fs/promises';
+import { createRequire } from 'node:module';
+import { dirname, resolve, relative, isAbsolute, sep } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+
+const sourceRoot = fileURLToPath(new URL('../', import.meta.url));
+const validId = /^\d{2}1(?:0[1-9]|[1-9]\d)(?:0[1-9]|[1-9]\d)$/;
+
+export function studentEmail(studentId, projectId) {
+  return `${studentId}@students.${projectId}.invalid`;
+}
+
+export function prepareRoster(input) {
+  const rows = Array.isArray(input) ? input : input?.students;
+  if (!Array.isArray(rows) || rows.length === 0) throw new Error('EMPTY_ROSTER');
+  const seen = new Set();
+  return rows.map((row) => {
+    if (
+      !row ||
+      typeof row !== 'object' ||
+      Object.hasOwn(row, 'student_pw') ||
+      Object.hasOwn(row, 'password')
+    )
+      throw new Error('INVALID_ROSTER_FIELDS');
+    const id = String(row.student_id ?? '')
+      .normalize('NFKC')
+      .trim();
+    const name = String(row.student_name ?? '')
+      .normalize('NFC')
+      .trim();
+    const year = row.admission_year;
+    if (
+      !validId.test(id) ||
+      !Number.isInteger(year) ||
+      year !== 2000 + Number(id.slice(0, 2)) ||
+      !name ||
+      Array.from(name).length > 30 ||
+      /[\p{Cc}\p{Cf}]/u.test(name)
+    )
+      throw new Error('INVALID_ROSTER_ROW');
+    if (seen.has(id)) throw new Error('DUPLICATE_STUDENT_ID');
+    seen.add(id);
+    return { student_id: id, student_name: name, admission_year: year };
+  });
+}
+
+function sameIdentity(data, student) {
+  return (
+    data?.student_id === student.student_id &&
+    data?.student_name === student.student_name &&
+    data?.admission_year === student.admission_year
+  );
+}
+
+function validDocument(data, student) {
+  const fields = [
+    'student_id',
+    'student_name',
+    'admission_year',
+    'is_active',
+    'write_blocked',
+    'blocked_until',
+    'created_at',
+    'updated_at',
+  ];
+  return (
+    sameIdentity(data, student) &&
+    fields.every((key) => Object.hasOwn(data, key)) &&
+    Object.keys(data).every((key) => fields.includes(key) || key === 'last_moderation_id') &&
+    (!Object.hasOwn(data, 'last_moderation_id') ||
+      (typeof data.last_moderation_id === 'string' &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
+          data.last_moderation_id,
+        ))) &&
+    typeof data.is_active === 'boolean' &&
+    typeof data.write_blocked === 'boolean' &&
+    (data.blocked_until === null || typeof data.blocked_until?.toMillis === 'function') &&
+    typeof data.created_at?.toMillis === 'function' &&
+    typeof data.updated_at?.toMillis === 'function'
+  );
+}
+
+async function authUser(auth, uid) {
+  try {
+    return await auth.getUser(uid);
+  } catch (error) {
+    if (error.code === 'auth/user-not-found') return null;
+    throw error;
+  }
+}
+
+function matchesAuth(user, email, student) {
+  return user.uid === student.student_id && user.email?.toLowerCase() === email;
+}
+
+export async function inspectStudent(auth, db, student, projectId) {
+  const email = studentEmail(student.student_id, projectId);
+  const [user, profile, admin] = await Promise.all([
+    authUser(auth, student.student_id),
+    db.doc(`students/${student.student_id}`).get(),
+    db.doc(`admins/${student.student_id}`).get(),
+  ]);
+  if (admin.exists) throw new Error('ADMIN_UID_CONFLICT');
+  if (user && !matchesAuth(user, email, student)) throw new Error('AUTH_IDENTITY_CONFLICT');
+  try {
+    const existingEmail = await auth.getUserByEmail(email);
+    if (existingEmail.uid !== student.student_id) throw new Error('EMAIL_UID_CONFLICT');
+  } catch (error) {
+    if (error.code !== 'auth/user-not-found') throw error;
+  }
+  if (profile.exists && !validDocument(profile.data(), student))
+    throw new Error('STUDENT_DOCUMENT_CONFLICT');
+  // This importer creates Auth first. A document without Auth is an external inconsistency.
+  if (profile.exists && !user) throw new Error('AUTH_MISSING_FOR_EXISTING_PROFILE');
+  return {
+    email,
+    user,
+    profile,
+    action: user ? (profile.exists ? 'unchanged' : 'recover_profile') : 'create_account',
+  };
+}
+
+export async function importStudent(auth, db, student, projectId, timestamp) {
+  const before = await inspectStudent(auth, db, student, projectId);
+  if (before.action === 'unchanged') return 'unchanged';
+  let created = false;
+  if (!before.user) {
+    try {
+      // Password is derived only here and is never written to a file or Firestore.
+      await auth.createUser({
+        uid: student.student_id,
+        email: before.email,
+        password: student.student_id,
+        displayName: student.student_name,
+        disabled: false,
+      });
+      created = true;
+    } catch (error) {
+      if (!['auth/uid-already-exists', 'auth/email-already-exists'].includes(error.code))
+        throw error;
+      const concurrent = await inspectStudent(auth, db, student, projectId);
+      if (!concurrent.user) throw new Error('CONCURRENT_ACCOUNT_CONFLICT');
+    }
+  }
+  // A retry recovers this step without resetting the already-created Auth password.
+  await db.runTransaction(async (tx) => {
+    const ref = db.doc(`students/${student.student_id}`);
+    const adminRef = db.doc(`admins/${student.student_id}`);
+    const [profile, admin] = await Promise.all([tx.get(ref), tx.get(adminRef)]);
+    if (admin.exists) throw new Error('ADMIN_UID_CONFLICT');
+    if (profile.exists) {
+      if (!validDocument(profile.data(), student)) throw new Error('STUDENT_DOCUMENT_CONFLICT');
+      return;
+    }
+    tx.create(ref, {
+      ...student,
+      is_active: true,
+      write_blocked: false,
+      blocked_until: null,
+      created_at: timestamp(),
+      updated_at: timestamp(),
+    });
+  });
+  const after = await inspectStudent(auth, db, student, projectId);
+  if (after.action !== 'unchanged') throw new Error('POST_IMPORT_VERIFICATION_FAILED');
+  return created ? 'created' : 'recovered_profile';
+}
+
+function argumentsFrom(args) {
+  const options = { apply: false, concurrency: 5 };
+  let mode;
+  const values = new Set([
+    'input',
+    'project',
+    'report',
+    'only',
+    'admin-module-dir',
+    'credential-module',
+    'concurrency',
+  ]);
+  for (let index = 0; index < args.length; index++) {
+    if (!args[index].startsWith('--')) throw new Error('INVALID_ARGUMENTS');
+    const key = args[index].replace(/^--/, '');
+    if (key === 'apply' || key === 'dry-run') {
+      if (mode && mode !== key) throw new Error('CONFLICTING_IMPORT_MODES');
+      mode = key;
+      options.apply = key === 'apply';
+    } else if (values.has(key) && args[index + 1] && !args[index + 1].startsWith('--'))
+      options[key] = args[++index];
+    else throw new Error('INVALID_ARGUMENTS');
+  }
+  if (!options.input || !/^[a-z][a-z0-9-]{4,28}[a-z0-9]$/.test(options.project ?? ''))
+    throw new Error(
+      'Usage: node scripts/import-students.mjs --input PRIVATE.json --project PROJECT [--dry-run|--apply] [--only ID] [--report PRIVATE.json] [--concurrency 1..10]',
+    );
+  options.concurrency = Number(options.concurrency);
+  if (!Number.isInteger(options.concurrency) || options.concurrency < 1 || options.concurrency > 10)
+    throw new Error('INVALID_CONCURRENCY');
+  return options;
+}
+
+export async function processRoster(rows, concurrency, work, onResult) {
+  if (!Number.isInteger(concurrency) || concurrency < 1 || concurrency > 10)
+    throw new Error('INVALID_CONCURRENCY');
+  const results = new Array(rows.length);
+  let next = 0;
+  let failure = null;
+  async function worker() {
+    while (!failure) {
+      const index = next++;
+      if (index >= rows.length) return;
+      try {
+        results[index] = await work(rows[index]);
+        await onResult(results.filter(Boolean));
+      } catch (error) {
+        failure ??= error;
+      }
+    }
+  }
+  // Always await in-flight rows before closing the SDK, even if a checkpoint fails.
+  await Promise.all(Array.from({ length: Math.min(concurrency, rows.length) }, worker));
+  if (failure) throw failure;
+  return results;
+}
+
+export async function retryFileOperation(
+  operation,
+  pause = (ms) => new Promise((done) => setTimeout(done, ms)),
+) {
+  const delays = [50, 100, 200, 400, 800, 1000, 1500];
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await operation();
+    } catch (error) {
+      if (!['EPERM', 'EACCES', 'EBUSY'].includes(error.code) || attempt >= delays.length)
+        throw error;
+      await pause(delays[attempt]);
+    }
+  }
+}
+
+function outsideSource(path) {
+  const child = relative(sourceRoot, path);
+  const escapes = child === '..' || child.startsWith('..' + sep) || isAbsolute(child);
+  if (!child || !escapes) throw new Error('PRIVATE_FILE_MUST_BE_OUTSIDE_REPOSITORY');
+}
+
+async function privateOutput(path) {
+  const actual = resolve(await realpath(dirname(path)), path.split(/[\\/]/).at(-1));
+  outsideSource(actual);
+  try {
+    if ((await lstat(actual)).isSymbolicLink()) throw new Error('REPORT_SYMLINK_NOT_ALLOWED');
+  } catch (error) {
+    if (error.code !== 'ENOENT') throw error;
+  }
+  return actual;
+}
+
+async function run() {
+  const options = argumentsFrom(process.argv.slice(2));
+  const inputPath = await realpath(resolve(options.input));
+  outsideSource(inputPath);
+  const reportPath = await privateOutput(
+    resolve(options.report ?? `${inputPath}.import-report.json`),
+  );
+  if (reportPath === inputPath) throw new Error('REPORT_CANNOT_OVERWRITE_ROSTER');
+  // Validate the entire input before --only, so duplicate IDs never pass silently.
+  const validated = prepareRoster(
+    JSON.parse((await readFile(inputPath, 'utf8')).replace(/^\uFEFF/, '')),
+  );
+  const students = options.only
+    ? validated.filter((row) => row.student_id === options.only)
+    : validated;
+  if (!students.length) throw new Error('NO_SELECTED_STUDENT');
+  const dependencyPath = options['admin-module-dir'] ?? process.env.FIREBASE_ADMIN_MODULE_DIR;
+  const require = createRequire(
+    dependencyPath ? resolve(dependencyPath, '__student_import__.cjs') : import.meta.url,
+  );
+  let appSdk, authSdk, dbSdk;
+  try {
+    appSdk = require('firebase-admin/app');
+    authSdk = require('firebase-admin/auth');
+    dbSdk = require('firebase-admin/firestore');
+  } catch {
+    throw new Error(
+      'FIREBASE_ADMIN_REQUIRED: install firebase-admin outside the repository and pass --admin-module-dir PATH_TO_NODE_MODULES',
+    );
+  }
+  let credential;
+  if (options['credential-module']) {
+    const credentialPath = await realpath(resolve(options['credential-module']));
+    outsideSource(credentialPath);
+    if (credentialPath === reportPath) throw new Error('REPORT_CANNOT_OVERWRITE_CREDENTIAL_MODULE');
+    const module = await import(pathToFileURL(credentialPath).href);
+    credential =
+      typeof module.default === 'function' ? await module.default(options.project) : module.default;
+    if (typeof credential?.getAccessToken !== 'function')
+      throw new Error('INVALID_CREDENTIAL_MODULE');
+  }
+  const app = appSdk.initializeApp({
+    projectId: options.project,
+    ...(credential ? { credential } : {}),
+  });
+  const auth = authSdk.getAuth(app),
+    db = dbSdk.getFirestore(app);
+  const report = {
+    mode: options.apply ? 'apply' : 'dry-run',
+    project: options.project,
+    started_at: new Date().toISOString(),
+    input_count: validated.length,
+    selected_count: students.length,
+    concurrency: options.concurrency,
+    results: [],
+  };
+  let checkpoints = Promise.resolve();
+  function checkpoint() {
+    const snapshot = JSON.stringify(report, null, 2) + '\n';
+    checkpoints = checkpoints.then(async () => {
+      const temporary = `${reportPath}.checkpoint-${process.pid}`;
+      let ownsTemporary = false;
+      try {
+        await writeFile(temporary, snapshot, { mode: 0o600, flag: 'wx' });
+        ownsTemporary = true;
+        // Windows readers and antivirus scans can briefly lock the destination.
+        await retryFileOperation(() => rename(temporary, reportPath));
+      } catch (error) {
+        // Never delete the last valid report to make a rename succeed.
+        if (ownsTemporary) {
+          try {
+            await retryFileOperation(() => unlink(temporary));
+          } catch {
+            /* A locked temporary file may remain for operator recovery. */
+          }
+        }
+        throw error;
+      }
+    });
+    return checkpoints;
+  }
+  try {
+    await checkpoint();
+    report.results = await processRoster(
+      students,
+      options.concurrency,
+      async (student) => {
+        const item = { student_id: student.student_id };
+        try {
+          item.status = options.apply
+            ? await importStudent(auth, db, student, options.project, () =>
+                dbSdk.FieldValue.serverTimestamp(),
+              )
+            : (await inspectStudent(auth, db, student, options.project)).action;
+        } catch (error) {
+          item.status = 'error';
+          // Deliberately exclude raw API messages, tokens, emails, and password-bearing payloads.
+          item.error = /^[A-Z_]+$/.test(error.message ?? '')
+            ? error.message
+            : String(error.code ?? 'IMPORT_FAILED');
+        }
+        return item;
+      },
+      async (results) => {
+        report.results = results;
+        await checkpoint();
+      },
+    );
+    report.completed_at = new Date().toISOString();
+    report.counts = Object.fromEntries(
+      [...new Set(report.results.map((item) => item.status))].map((status) => [
+        status,
+        report.results.filter((item) => item.status === status).length,
+      ]),
+    );
+    await checkpoint();
+    console.log(
+      JSON.stringify({
+        mode: report.mode,
+        selected: students.length,
+        concurrency: options.concurrency,
+        counts: report.counts,
+      }),
+    );
+    if (report.counts.error) process.exitCode = 1;
+  } finally {
+    await appSdk.deleteApp(app);
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  run().catch((error) => {
+    const message = String(error.message ?? 'IMPORT_FAILED');
+    console.error(
+      message.startsWith('Usage:') ||
+        message.startsWith('FIREBASE_ADMIN_REQUIRED:') ||
+        /^[A-Z_]+$/.test(message)
+        ? message
+        : String(error.code ?? 'IMPORT_FAILED'),
+    );
+    process.exitCode = 1;
+  });
+}

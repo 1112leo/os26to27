@@ -1,4 +1,4 @@
-import { adminContext, deviceIdentity, firebaseError } from '../firebase.js';
+import { adminContext, studentContext, firebaseError } from '../firebase.js';
 import { submitTyping } from '../database.js';
 
 import { toCsv } from '../common.js';
@@ -95,9 +95,14 @@ export async function saveResult(result, asAdmin = false) {
     backupSaved = false;
   }
   try {
-    // Normal booth submissions keep the device identity even while an operator is signed in.
-    const context = asAdmin ? await adminContext() : await deviceIdentity();
-    await submitTyping(context.db, context.uid, result);
+    const context = asAdmin ? await adminContext() : await studentContext();
+    if (
+      !asAdmin &&
+      (result.participantId !== context.uid ||
+        (result.owner_uid && result.owner_uid !== context.uid))
+    )
+      throw new Error('로그인 계정과 저장할 기록이 일치하지 않습니다. 운영진에게 문의하세요.');
+    await submitTyping(context.db, context.uid, result, { asAdmin });
     try {
       await saveLocalResult({ ...queued, syncState: 'synced', syncError: '' });
       backupSaved = true;
