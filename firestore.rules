@@ -5,8 +5,10 @@
 // publicLetters/{UUID}: id, nickname, content, order, sort_order; sanitized approved projection only.
 // typingResults/{UUID}: participant/name (30), challenge, time (<=1h), score, verification, prize, timestamps.
 // receipts/{UUID} and rateLimits/{uid}: immutable receipt metadata and atomic device throttling.
-// students/{7-digit admission ID}: student_id/name, admission_year, is_active, write_blocked,
+// students/{opaque 20-character UID}: student_id is the same internal UID (not a school number).
+// student_name, admission_year, is_active, write_blocked,
 // blocked_until timestamp/null, created_at/updated_at timestamps; optional login_id current5digits, last_moderation_id UUID.
+// Legacy 7-digit document IDs remain accepted only during migration/backup recovery.
 // moderationLogs/{UUID}: target_student_id, action, reason(1..500), operator_uid,
 // related_letter_id UUID/null, created_at; immutable admin-only audit history.
 // settings/sessionPolicy: boothMode bool, idleMinutes int(1..120), academicYear int(2020..2100), updated_at.
@@ -19,11 +21,22 @@ service cloud.firestore {
         && get(/databases/$(database)/documents/admins/$(request.auth.uid)).data.enabled == true;
     }
     function student() {
-      return signedIn() && request.auth.uid.matches('[0-9]{7}')
+      return signedIn() && studentUid(request.auth.uid)
         && request.auth.token.firebase.sign_in_provider == 'password'
         && exists(/databases/$(database)/documents/students/$(request.auth.uid))
         && get(/databases/$(database)/documents/students/$(request.auth.uid)).data.student_id == request.auth.uid
-        && get(/databases/$(database)/documents/students/$(request.auth.uid)).data.is_active == true;
+        && get(/databases/$(database)/documents/students/$(request.auth.uid)).data.is_active == true
+        && (request.auth.uid.matches('[0-9]{7}')
+          || studentAlias(get(/databases/$(database)/documents/students/$(request.auth.uid)).data));
+    }
+    function studentUid(value) {
+      return value is string && (value.matches('[A-Za-z0-9_-]{20}') || value.matches('[0-9]{7}'));
+    }
+    function studentAlias(data) {
+      let loginId = data.get('login_id', '');
+      let email = request.auth.token.get('email', '');
+      return loginId is string && loginId.matches('[1-3][0-9]{4}') && email is string
+        && email.matches(loginId + '@students[.][A-Za-z0-9-]+[.]invalid');
     }
     function mayWriteLetter() {
       let data = get(/databases/$(database)/documents/students/$(request.auth.uid)).data;
@@ -49,7 +62,7 @@ service cloud.firestore {
           && receipt.owner_uid == getAfter(/databases/$(database)/documents/typingResults/$(id)).data.owner_uid));
     }
     function recoveryOwner(data) {
-      return admin() && data.owner_uid is string && data.owner_uid.matches('[0-9]{7}')
+      return admin() && studentUid(data.owner_uid)
         && data.participantId == data.owner_uid
         && exists(/databases/$(database)/documents/students/$(data.owner_uid))
         && get(/databases/$(database)/documents/students/$(data.owner_uid)).data.student_id == data.owner_uid;
@@ -65,12 +78,12 @@ service cloud.firestore {
     }
 
     function validStudent(data, id) {
-      return id.matches('[0-9]{7}')
+      return studentUid(id)
         && data.keys().hasAll(['student_id', 'student_name', 'admission_year', 'is_active', 'write_blocked', 'blocked_until', 'created_at', 'updated_at'])
         && data.keys().hasOnly(['student_id', 'student_name', 'admission_year', 'is_active', 'write_blocked', 'blocked_until', 'created_at', 'updated_at', 'last_moderation_id', 'login_id'])
         && data.student_id == id && text(data.student_name, 1, 30)
         && data.admission_year is int && data.admission_year >= 2020 && data.admission_year <= 2099
-        && id.matches(string(data.admission_year - 2000) + '[0-9]{5}')
+        && (!id.matches('[0-9]{7}') || id.matches(string(data.admission_year - 2000) + '[0-9]{5}'))
         && data.is_active is bool && data.write_blocked is bool
         && (data.blocked_until == null || data.blocked_until is timestamp)
         && (data.write_blocked || data.blocked_until == null)
@@ -114,7 +127,7 @@ service cloud.firestore {
         return uuid(id)
           && data.keys().hasAll(['target_student_id', 'action', 'reason', 'operator_uid', 'related_letter_id', 'created_at'])
           && data.keys().hasOnly(['target_student_id', 'action', 'reason', 'operator_uid', 'related_letter_id', 'created_at'])
-          && data.target_student_id is string && data.target_student_id.matches('[0-9]{7}')
+          && studentUid(data.target_student_id)
           && text(data.reason, 1, 500) && data.operator_uid == request.auth.uid && data.created_at == request.time
           && data.action in ['block_write', 'unblock_write', 'deactivate', 'activate']
           && (data.related_letter_id == null || (uuid(data.related_letter_id)

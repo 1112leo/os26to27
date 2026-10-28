@@ -11,7 +11,7 @@ import {
   validDocument,
 } from './import-students.mjs';
 
-const admissionId = /^\d{2}1(?:0[1-9]|[1-9]\d)(?:0[1-9]|[1-9]\d)$/;
+const canonicalId = /^[A-Za-z0-9_-]{20}$/;
 const loginId = /^[1-3](?:0[1-9]|[1-9]\d)(?:0[1-9]|[1-9]\d)$/;
 
 // Current class and number must be supplied by a verified roster, never inferred.
@@ -34,13 +34,8 @@ export function prepareLoginMappings(input, academicYear) {
     const login_id = String(row.login_id ?? '')
       .normalize('NFKC')
       .trim();
-    if (!admissionId.test(student_id) || !loginId.test(login_id))
+    if (!canonicalId.test(student_id) || !loginId.test(login_id))
       throw new Error('INVALID_MAPPING');
-    if (
-      academicYear !== undefined &&
-      academicYear - (2000 + Number(student_id.slice(0, 2))) + 1 !== Number(login_id[0])
-    )
-      throw new Error('MAPPING_GRADE_MISMATCH');
     if (identities.has(student_id)) throw new Error('DUPLICATE_STUDENT_ID');
     if (logins.has(login_id)) throw new Error('DUPLICATE_LOGIN_ID');
     identities.add(student_id);
@@ -67,7 +62,8 @@ function profileMatches(data, mapping, academicYear) {
     }) &&
     data?.student_id === mapping.student_id &&
     Number.isInteger(data.admission_year) &&
-    data.admission_year === 2000 + Number(mapping.student_id.slice(0, 2)) &&
+    data.admission_year >= 2000 &&
+    data.admission_year <= 2100 &&
     academicYear - data.admission_year + 1 === Number(mapping.login_id[0]) &&
     typeof data.student_name === 'string' &&
     Array.from(data.student_name).length > 0 &&
@@ -95,7 +91,8 @@ export async function inspectLoginMapping(auth, db, mapping, projectId, academic
     ![email, studentEmail(mapping.student_id, projectId)].includes(user.email?.toLowerCase())
   )
     throw new Error('AUTH_IDENTITY_CONFLICT');
-  if (emailOwner && emailOwner.uid !== mapping.student_id) throw new Error('LOGIN_EMAIL_CONFLICT');
+  if (emailOwner && emailOwner.uid !== mapping.student_id)
+    throw new Error('LOGIN_EMAIL_CONFLICT');
   if (aliases.docs.some((snapshot) => snapshot.id !== mapping.student_id))
     throw new Error('LOGIN_PROFILE_CONFLICT');
   const linkedAuth = user.email.toLowerCase() === email;
@@ -134,7 +131,8 @@ export async function linkStudentLogin(auth, db, mapping, projectId, academicYea
       tx.update(ref, { login_id: mapping.login_id, updated_at: timestamp() });
   });
   if (
-    (await inspectLoginMapping(auth, db, mapping, projectId, academicYear)).action !== 'unchanged'
+    (await inspectLoginMapping(auth, db, mapping, projectId, academicYear)).action !==
+    'unchanged'
   )
     throw new Error('POST_LINK_VERIFICATION_FAILED');
   return before.action === 'link' ? 'linked' : 'recovered';
@@ -176,7 +174,11 @@ function argumentsFrom(args) {
     throw new Error(
       'Usage: node scripts/link-student-logins.mjs --input PRIVATE.json --project PROJECT --academic-year YEAR [--dry-run|--apply] [--concurrency 1..10]',
     );
-  if (!Number.isInteger(options.concurrency) || options.concurrency < 1 || options.concurrency > 10)
+  if (
+    !Number.isInteger(options.concurrency) ||
+    options.concurrency < 1 ||
+    options.concurrency > 10
+  )
     throw new Error('INVALID_CONCURRENCY');
   return options;
 }
@@ -220,7 +222,9 @@ async function run() {
     if (path === reportPath) throw new Error('REPORT_CANNOT_OVERWRITE_CREDENTIAL_MODULE');
     const module = await import(pathToFileURL(path).href);
     credential =
-      typeof module.default === 'function' ? await module.default(options.project) : module.default;
+      typeof module.default === 'function'
+        ? await module.default(options.project)
+        : module.default;
     if (typeof credential?.getAccessToken !== 'function')
       throw new Error('INVALID_CREDENTIAL_MODULE');
   }
@@ -272,11 +276,23 @@ async function run() {
           return {
             ...row,
             status: apply
-              ? await linkStudentLogin(auth, db, row, options.project, options.academicYear, () =>
-                  dbSdk.FieldValue.serverTimestamp(),
+              ? await linkStudentLogin(
+                  auth,
+                  db,
+                  row,
+                  options.project,
+                  options.academicYear,
+                  () => dbSdk.FieldValue.serverTimestamp(),
                 )
-              : (await inspectLoginMapping(auth, db, row, options.project, options.academicYear))
-                  .action,
+              : (
+                  await inspectLoginMapping(
+                    auth,
+                    db,
+                    row,
+                    options.project,
+                    options.academicYear,
+                  )
+                ).action,
           };
         } catch (error) {
           return { ...row, status: 'error', error: safeError(error) };

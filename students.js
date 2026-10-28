@@ -16,7 +16,8 @@ import {
 } from 'https://www.gstatic.com/firebasejs/13.1.0/firebase-firestore.js';
 
 export const DEFAULT_SESSION_POLICY = { boothMode: true, idleMinutes: 10, academicYear: 2026 };
-const STUDENT_ID = /^\d{7}$/;
+const STUDENT_ID = /^(?:[A-Za-z0-9_-]{20}|[0-9]{7})$/;
+const CANONICAL_STUDENT_ID = /^[A-Za-z0-9_-]{20}$/;
 
 export function studentGrade(student, academicYear) {
   const grade = academicYear - student.admission_year + 1;
@@ -84,7 +85,9 @@ export async function readStudentHistory(db, studentId) {
     letters: letters.sort(
       (a, b) => (b.created_at?.toMillis() ?? 0) - (a.created_at?.toMillis() ?? 0),
     ),
-    logs: logs.sort((a, b) => (b.created_at?.toMillis() ?? 0) - (a.created_at?.toMillis() ?? 0)),
+    logs: logs.sort(
+      (a, b) => (b.created_at?.toMillis() ?? 0) - (a.created_at?.toMillis() ?? 0),
+    ),
   };
 }
 export function moderationUpdate(action, until = null) {
@@ -138,7 +141,7 @@ export async function canResetStudentPassword() {
 }
 export async function resetStudentPassword(studentId, reason) {
   if (
-    !STUDENT_ID.test(studentId) ||
+    !CANONICAL_STUDENT_ID.test(studentId) ||
     !normalizeText(reason) ||
     Array.from(normalizeText(reason)).length > 500
   )
@@ -151,7 +154,8 @@ export async function resetStudentPassword(studentId, reason) {
   await adminContext();
   if (!functionsClient) {
     functionsClient = (async () => {
-      const sdk = await import('https://www.gstatic.com/firebasejs/13.1.0/firebase-functions.js');
+      const sdk =
+        await import('https://www.gstatic.com/firebasejs/13.1.0/firebase-functions.js');
       const client = sdk.getFunctions(
         adminAuth.app,
         adminAuth.app.options.functionsRegion || 'asia-northeast3',

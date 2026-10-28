@@ -5,24 +5,33 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const sourceRoot = fileURLToPath(new URL('../', import.meta.url));
 const validId = /^\d{2}1(?:0[1-9]|[1-9]\d)(?:0[1-9]|[1-9]\d)$/;
+const opaqueUid = /^[A-Za-z0-9_-]{20}$/;
+const currentId = /^[1-3](?:0[1-9]|[1-9]\d)(?:0[1-9]|[1-9]\d)$/;
+const identity = (student) => student.uid ?? student.student_id;
 
 export function studentEmail(studentId, projectId) {
-  return `${studentId}@students.${projectId}.invalid`;
+  return `${studentId.toLowerCase()}@students.${projectId}.invalid`;
 }
 
 export function prepareRoster(input) {
   const rows = Array.isArray(input) ? input : input?.students;
   if (!Array.isArray(rows) || rows.length === 0) throw new Error('EMPTY_ROSTER');
-  const seen = new Set();
+  const seen = new Set(),
+    uids = new Set(),
+    logins = new Set(),
+    emails = new Set();
   return rows.map((row) => {
     if (
       !row ||
       typeof row !== 'object' ||
-      Object.hasOwn(row, 'student_pw') ||
-      Object.hasOwn(row, 'password')
+      Array.isArray(row) ||
+      Object.keys(row).some(
+        (key) =>
+          !['uid', 'admission_id', 'student_name', 'admission_year', 'login_id'].includes(key),
+      )
     )
       throw new Error('INVALID_ROSTER_FIELDS');
-    const id = String(row.student_id ?? '')
+    const id = String(row.admission_id ?? '')
       .normalize('NFKC')
       .trim();
     const name = String(row.student_name ?? '')
@@ -30,6 +39,8 @@ export function prepareRoster(input) {
       .trim();
     const year = row.admission_year;
     if (
+      typeof row.uid !== 'string' ||
+      !opaqueUid.test(row.uid) ||
       !validId.test(id) ||
       !Number.isInteger(year) ||
       year !== 2000 + Number(id.slice(0, 2)) ||
@@ -39,14 +50,33 @@ export function prepareRoster(input) {
     )
       throw new Error('INVALID_ROSTER_ROW');
     if (seen.has(id)) throw new Error('DUPLICATE_STUDENT_ID');
+    if (uids.has(row.uid)) throw new Error('DUPLICATE_UID');
+    if (
+      row.login_id !== undefined &&
+      (typeof row.login_id !== 'string' ||
+        !currentId.test(row.login_id) ||
+        logins.has(row.login_id))
+    )
+      throw new Error('INVALID_OR_DUPLICATE_LOGIN_ID');
+    const emailKey = row.login_id ?? row.uid.toLowerCase();
+    if (emails.has(emailKey)) throw new Error('DUPLICATE_INTERNAL_EMAIL');
     seen.add(id);
-    return { student_id: id, student_name: name, admission_year: year };
+    uids.add(row.uid);
+    if (row.login_id) logins.add(row.login_id);
+    emails.add(emailKey);
+    return {
+      uid: row.uid,
+      admission_id: id,
+      student_name: name,
+      admission_year: year,
+      ...(row.login_id ? { login_id: row.login_id } : {}),
+    };
   });
 }
 
 function sameIdentity(data, student) {
   return (
-    data?.student_id === student.student_id &&
+    data?.student_id === identity(student) &&
     data?.student_name === student.student_name &&
     data?.admission_year === student.admission_year
   );
@@ -94,23 +124,28 @@ async function authUser(auth, uid) {
 }
 
 function matchesAuth(user, email, student) {
-  return user.uid === student.student_id && user.email?.toLowerCase() === email;
+  return user.uid === identity(student) && user.email?.toLowerCase() === email;
 }
 
 export async function inspectStudent(auth, db, student, projectId) {
   const [user, profile, admin] = await Promise.all([
-    authUser(auth, student.student_id),
-    db.doc(`students/${student.student_id}`).get(),
-    db.doc(`admins/${student.student_id}`).get(),
+    authUser(auth, identity(student)),
+    db.doc(`students/${identity(student)}`).get(),
+    db.doc(`admins/${identity(student)}`).get(),
   ]);
   if (admin.exists) throw new Error('ADMIN_UID_CONFLICT');
   if (profile.exists && !validDocument(profile.data(), student))
     throw new Error('STUDENT_DOCUMENT_CONFLICT');
-  const email = studentEmail(profile.data()?.login_id ?? student.student_id, projectId);
+  const email = studentEmail(
+    profile.data()?.login_id ?? student.login_id ?? identity(student),
+    projectId,
+  );
+  if (student.login_id && profile.exists && profile.data().login_id !== student.login_id)
+    throw new Error('LOGIN_PROFILE_CONFLICT');
   if (user && !matchesAuth(user, email, student)) throw new Error('AUTH_IDENTITY_CONFLICT');
   try {
     const existingEmail = await auth.getUserByEmail(email);
-    if (existingEmail.uid !== student.student_id) throw new Error('EMAIL_UID_CONFLICT');
+    if (existingEmail.uid !== identity(student)) throw new Error('EMAIL_UID_CONFLICT');
   } catch (error) {
     if (error.code !== 'auth/user-not-found') throw error;
   }
@@ -125,6 +160,8 @@ export async function inspectStudent(auth, db, student, projectId) {
 }
 
 export async function importStudent(auth, db, student, projectId, timestamp) {
+  if (!opaqueUid.test(student.uid ?? '') || !validId.test(student.admission_id ?? ''))
+    throw new Error('OPAQUE_UID_REQUIRED');
   const before = await inspectStudent(auth, db, student, projectId);
   if (before.action === 'unchanged') return 'unchanged';
   let created = false;
@@ -132,9 +169,9 @@ export async function importStudent(auth, db, student, projectId, timestamp) {
     try {
       // Password is derived only here and is never written to a file or Firestore.
       await auth.createUser({
-        uid: student.student_id,
+        uid: student.uid,
         email: before.email,
-        password: student.student_id,
+        password: student.admission_id,
         displayName: student.student_name,
         disabled: false,
       });
@@ -148,8 +185,8 @@ export async function importStudent(auth, db, student, projectId, timestamp) {
   }
   // A retry recovers this step without resetting the already-created Auth password.
   await db.runTransaction(async (tx) => {
-    const ref = db.doc(`students/${student.student_id}`);
-    const adminRef = db.doc(`admins/${student.student_id}`);
+    const ref = db.doc(`students/${student.uid}`);
+    const adminRef = db.doc(`admins/${student.uid}`);
     const [profile, admin] = await Promise.all([tx.get(ref), tx.get(adminRef)]);
     if (admin.exists) throw new Error('ADMIN_UID_CONFLICT');
     if (profile.exists) {
@@ -157,7 +194,10 @@ export async function importStudent(auth, db, student, projectId, timestamp) {
       return;
     }
     tx.create(ref, {
-      ...student,
+      student_id: student.uid,
+      student_name: student.student_name,
+      admission_year: student.admission_year,
+      ...(student.login_id ? { login_id: student.login_id } : {}),
       is_active: true,
       write_blocked: false,
       blocked_until: null,
@@ -198,7 +238,11 @@ function argumentsFrom(args) {
       'Usage: node scripts/import-students.mjs --input PRIVATE.json --project PROJECT [--dry-run|--apply] [--only ID] [--report PRIVATE.json] [--concurrency 1..10]',
     );
   options.concurrency = Number(options.concurrency);
-  if (!Number.isInteger(options.concurrency) || options.concurrency < 1 || options.concurrency > 10)
+  if (
+    !Number.isInteger(options.concurrency) ||
+    options.concurrency < 1 ||
+    options.concurrency > 10
+  )
     throw new Error('INVALID_CONCURRENCY');
   return options;
 }
@@ -273,7 +317,7 @@ async function run() {
     JSON.parse((await readFile(inputPath, 'utf8')).replace(/^\uFEFF/, '')),
   );
   const students = options.only
-    ? validated.filter((row) => row.student_id === options.only)
+    ? validated.filter((row) => row.uid === options.only || row.login_id === options.only)
     : validated;
   if (!students.length) throw new Error('NO_SELECTED_STUDENT');
   const dependencyPath = options['admin-module-dir'] ?? process.env.FIREBASE_ADMIN_MODULE_DIR;
@@ -294,10 +338,13 @@ async function run() {
   if (options['credential-module']) {
     const credentialPath = await realpath(resolve(options['credential-module']));
     outsideSource(credentialPath);
-    if (credentialPath === reportPath) throw new Error('REPORT_CANNOT_OVERWRITE_CREDENTIAL_MODULE');
+    if (credentialPath === reportPath)
+      throw new Error('REPORT_CANNOT_OVERWRITE_CREDENTIAL_MODULE');
     const module = await import(pathToFileURL(credentialPath).href);
     credential =
-      typeof module.default === 'function' ? await module.default(options.project) : module.default;
+      typeof module.default === 'function'
+        ? await module.default(options.project)
+        : module.default;
     if (typeof credential?.getAccessToken !== 'function')
       throw new Error('INVALID_CREDENTIAL_MODULE');
   }
@@ -347,7 +394,10 @@ async function run() {
       students,
       options.concurrency,
       async (student) => {
-        const item = { student_id: student.student_id };
+        const item = {
+          uid: student.uid,
+          ...(student.login_id ? { login_id: student.login_id } : {}),
+        };
         try {
           item.status = options.apply
             ? await importStudent(auth, db, student, options.project, () =>

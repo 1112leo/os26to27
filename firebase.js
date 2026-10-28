@@ -316,18 +316,20 @@ export function sessionPolicy(data) {
     academicYear: Number.isInteger(data?.academicYear) ? data.academicYear : 2026,
   };
 }
-export function studentEmail(studentId, projectId) {
-  if (!/^(?:[0-9]{5}|[0-9]{7})$/.test(studentId))
-    throw new ClientError('학번을 확인해 주세요.', 400);
-  return `${studentId}@students.${projectId}.invalid`;
+export const STUDENT_UID_PATTERN = /^(?:[A-Za-z0-9_-]{20}|[0-9]{7})$/;
+export function studentEmail(loginId, projectId) {
+  if (typeof loginId !== 'string' || !/^[1-3][0-9]{4}$/.test(loginId))
+    throw new ClientError('현재 학번 5자리를 확인해 주세요.', 400);
+  return `${loginId}@students.${projectId}.invalid`;
 }
 function studentProfile(user, data, projectId) {
   if (
     !user ||
     user.isAnonymous ||
-    !/^[0-9]{7}$/.test(user.uid) ||
-    (user.email !== studentEmail(user.uid, projectId) &&
-      (!data?.login_id || user.email !== studentEmail(data.login_id, projectId))) ||
+    !STUDENT_UID_PATTERN.test(user.uid) ||
+    typeof data?.login_id !== 'string' ||
+    !/^[1-3][0-9]{4}$/.test(data.login_id) ||
+    user.email !== studentEmail(data.login_id, projectId) ||
     data?.student_id !== user.uid ||
     data?.is_active !== true ||
     typeof data.student_name !== 'string'
@@ -371,7 +373,7 @@ export async function loginStudent(id, password) {
       async (user, db) => {
         const record = await getDoc(doc(db, 'students', user.uid));
         const profile = studentProfile(user, record.data(), clients.projectId);
-        if ((id.length === 7 && user.uid !== id) || (id.length === 5 && profile.loginId !== id))
+        if (profile.loginId !== id)
           throw new ClientError('계정을 사용할 수 없습니다. 운영진에게 문의하세요.', 403);
         return profile;
       },

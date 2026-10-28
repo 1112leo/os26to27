@@ -84,7 +84,7 @@ export function validateBackup(input) {
       const id = row?.id;
       const validId =
         collection === 'students'
-          ? /^\d{7}$/.test(id)
+          ? /^(?:[A-Za-z0-9_-]{20}|\d{7})$/.test(id)
           : collection === 'settings'
             ? ['event', 'sessionPolicy'].includes(id)
             : collection === 'challenges'

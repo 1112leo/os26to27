@@ -59,7 +59,6 @@ export function resultsCsv(results, { rankedOnly = true } = {}) {
       '순위',
       '학번',
       '이름',
-      '기록 학번',
       '문구 버전',
       '소요 시간(ms)',
       '타수',
@@ -72,9 +71,8 @@ export function resultsCsv(results, { rankedOnly = true } = {}) {
     ],
     ...records.map((r) => [
       r.rank,
-      r.loginId || r.participantId,
+      r.loginId || (/^[1-3][0-9]{4}$/.test(r.participantId) ? r.participantId : '미연결'),
       r.displayName,
-      r.participantId,
       r.challengeId,
       r.elapsedMs,
       r.speed,
@@ -145,7 +143,8 @@ export async function importResultFile(input) {
     ids.add(item.id);
     if (
       item.owner_uid &&
-      (!/^[0-9]{7}$/.test(item.owner_uid) || item.participantId !== item.owner_uid)
+      (!/^(?:[A-Za-z0-9_-]{20}|[0-9]{7})$/.test(item.owner_uid) ||
+        item.participantId !== item.owner_uid)
     )
       throw new Error('원래 작성 계정이 다른 기록입니다.');
     if (!challenges.has(item.challengeId))

@@ -27,7 +27,7 @@ export const resetStudentPassword = onCall(
       Array.isArray(data) ||
       Object.keys(data).some((key) => !['studentId', 'reason'].includes(key)) ||
       typeof data.studentId !== 'string' ||
-      !/^\d{7}$/.test(data.studentId) ||
+      !/^[A-Za-z0-9_-]{20}$/.test(data.studentId) ||
       typeof data.reason !== 'string' ||
       !data.reason.trim() ||
       Array.from(data.reason.trim()).length > 500
@@ -52,11 +52,14 @@ export const resetStudentPassword = onCall(
     )
       throw new HttpsError('failed-precondition', '등록된 학생 계정만 재발급할 수 있습니다.');
     const projectId = process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
-    if (!projectId) throw new HttpsError('failed-precondition', '서버 프로젝트 설정을 확인하세요.');
+    if (!projectId)
+      throw new HttpsError('failed-precondition', '서버 프로젝트 설정을 확인하세요.');
     const account = await auth.getUser(studentId).catch(() => null);
+    const loginId = target.data().login_id;
     if (
       !account ||
-      account.email !== `${target.data().login_id || studentId}@students.${projectId}.invalid`
+      (loginId != null && !/^[1-3][0-9]{4}$/.test(loginId)) ||
+      account.email !== `${loginId || studentId.toLowerCase()}@students.${projectId}.invalid`
     )
       throw new HttpsError('failed-precondition', '학생 Auth 계정과 명부가 일치하지 않습니다.');
     const operationId = randomUUID();
@@ -93,7 +96,10 @@ export const resetStudentPassword = onCall(
         currentStudent.data()?.student_id !== studentId ||
         currentTargetRole.data()?.enabled === true
       )
-        throw new HttpsError('permission-denied', '관리자 권한 또는 학생 정보를 다시 확인하세요.');
+        throw new HttpsError(
+          'permission-denied',
+          '관리자 권한 또는 학생 정보를 다시 확인하세요.',
+        );
       await auth.updateUser(studentId, { password });
       changed = true;
       await auth.revokeRefreshTokens(studentId);

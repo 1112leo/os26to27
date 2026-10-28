@@ -19,7 +19,7 @@ import {
 import { normalizeText, unicodeLength, UUID_PATTERN, validateSubmission } from './common.js';
 import { calculateScore, countKeystrokes } from './typing/scoring.js';
 import { CHALLENGE } from './typing/challenge.js';
-import { ClientError, withDeadline, adminContext } from './firebase.js';
+import { ClientError, withDeadline, adminContext, STUDENT_UID_PATTERN } from './firebase.js';
 export const RATE_LIMIT = 600;
 export const PAGE_SIZE = 100;
 export async function payloadHash(payload) {
@@ -123,7 +123,7 @@ export function validateTypingResult(input, challenge = CHALLENGE) {
     throw new ClientError('타수와 최종 점수 계산이 일치하지 않습니다.', 400, 'INVALID_SCORE');
 }
 async function submissionStudent(db, uid, writing = false) {
-  if (!/^[0-9]{7}$/.test(uid)) throw new ClientError('학생 로그인이 필요합니다.', 401);
+  if (!STUDENT_UID_PATTERN.test(uid)) throw new ClientError('학생 로그인이 필요합니다.', 401);
   const snapshot = await withDeadline(getDoc(doc(db, 'students', uid)));
   const student = snapshot.data();
   if (student?.student_id !== uid || student?.is_active !== true)
@@ -145,7 +145,7 @@ export async function submitTyping(db, uid, result, { asAdmin = false } = {}) {
   validateTypingResult(result, await readChallenge(db, result.challengeId));
   const ownerUid = asAdmin && result.owner_uid ? result.owner_uid : uid;
   if (asAdmin && ownerUid !== uid) {
-    if (!/^[0-9]{7}$/.test(ownerUid) || result.participantId !== ownerUid)
+    if (!STUDENT_UID_PATTERN.test(ownerUid) || result.participantId !== ownerUid)
       throw new ClientError('복구할 기록의 작성 계정이 일치하지 않습니다.', 400);
     const original = await withDeadline(getDoc(doc(db, 'students', ownerUid)));
     if (original.data()?.student_id !== ownerUid)

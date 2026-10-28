@@ -449,7 +449,7 @@ function renderLetters() {
 function letterAuthor(letter) {
   const student = students.find((item) => item.student_id === letter.owner_uid);
   return student
-    ? `작성 계정: ${student.login_id || student.student_id} ${student.student_name}`
+    ? `작성 계정: ${student.login_id || '현재 학번 미연결'} ${student.student_name}`
     : '명부 연결 전·관리자 작성 기록';
 }
 function letterEditor(letter) {
@@ -615,7 +615,7 @@ function renderResults() {
       .slice((resultPage - 1) * 50, resultPage * 50)
       .map(
         (item) => `<tr>
-    <td>${item.rank ?? '—'}${item.practice ? ' (연습)' : ''}</td><td>${html(item.displayName)}<small>${html(item.loginId || item.participantId)}</small></td><td>${item.score}</td><td>${item.speed} / ${item.errors}</td><td>${(item.elapsedMs / 1000).toFixed(2)}초</td>
+    <td>${item.rank ?? '—'}${item.practice ? ' (연습)' : ''}</td><td>${html(item.displayName)}<small>${html(item.loginId || (/^[1-3][0-9]{4}$/.test(item.participantId) ? item.participantId : '미연결'))}</small></td><td>${item.score}</td><td>${item.speed} / ${item.errors}</td><td>${(item.elapsedMs / 1000).toFixed(2)}초</td>
     <td>${select(`review-${item.id}`, '확인', item.verificationStatus ?? 'pending', Object.entries(verification))}</td>
     <td><button data-prize="${item.id}"${item.practice || item.verificationStatus !== 'verified' ? ' disabled' : ''}>${item.prizeReceived ? '수령' : '미수령'}</button></td>
     <td><button data-edit="${item.id}">수정</button><button class="danger" data-delete="${item.id}">삭제</button></td></tr>`,
@@ -684,9 +684,13 @@ function renderResults() {
 function resultEditor(result) {
   if (!confirmDiscard($('#editor'))) return;
   const creationKey = crypto.randomUUID();
+  const linked = students.find((student) => student.student_id === result?.participantId);
+  const number =
+    linked?.login_id ||
+    (/^[1-3][0-9]{4}$/.test(result?.participantId ?? '') ? result.participantId : '');
   $('#editor').innerHTML =
     `<form id="result-editor" class="panel"><h2>${result ? '기록 수정' : '기록 추가'}</h2>
-    <div class="form-grid">${field('participantId', '입학 ID (기록 식별자)', result?.participantId, 'text', 'required maxlength="30"')}${field('displayName', '이름', result?.displayName, 'text', 'required maxlength="30"')}</div>
+    <div class="form-grid">${field('studentNumber', '학번', number, 'text', `${result ? '' : 'required '}pattern="[1-3][0-9]{4}" maxlength="5"`)}${field('displayName', '이름', result?.displayName, 'text', 'required maxlength="30"')}</div>
     ${select(
       'challengeId',
       '문구',
@@ -699,7 +703,13 @@ function resultEditor(result) {
   $('#editor').scrollIntoView({ block: 'start' });
   $('#close-editor').onclick = closeEditor;
   const form = $('#result-editor');
-  form.oninput = () => {
+  form.oninput = (event) => {
+    if (event.target.name === 'studentNumber') {
+      const selected = students.find(
+        (item) => item.login_id === form.elements.studentNumber.value,
+      );
+      if (selected) form.elements.displayName.value = selected.student_name;
+    }
     const values = data(form);
     const challenge = challenges.find((item) => item.challengeId === values.challengeId);
     try {
@@ -716,13 +726,19 @@ function resultEditor(result) {
   submit(form, async (values) => {
     const { db, uid } = await adminContext();
     const challenge = challenges.find((item) => item.challengeId === values.challengeId);
+    const student = values.studentNumber
+      ? students.find((item) => item.login_id === values.studentNumber)
+      : null;
+    if (values.studentNumber && !student)
+      throw new Error('현재 학번이 연결된 학생을 선택하세요.');
+    if (!student && !result) throw new Error('학번을 확인하세요.');
     await saveTyping(
       db,
       uid,
       result?.id ?? null,
       {
-        participantId: values.participantId,
-        displayName: values.displayName,
+        participantId: student?.student_id ?? result.participantId,
+        displayName: student?.student_name ?? values.displayName,
         challengeId: values.challengeId,
         elapsedMs: Number(values.seconds) * 1000,
         errors: Number(values.errors),
@@ -784,7 +800,7 @@ function renderStudents() {
       .slice((studentPage - 1) * 50, studentPage * 50)
       .map(
         (student) => `<tr>
-      <td>${html(student.login_id || '미연결')}<small>${html(student.student_id)}</small></td><td>${html(student.student_name)}</td>
+      <td>${html(student.login_id || '미연결')}</td><td>${html(student.student_name)}</td>
       <td>${studentGrade(student, sessionPolicy.academicYear) ?? '—'}</td>
       <td>${student.is_active ? '활성' : '비활성'}</td><td>${writeRestricted(student) ? '제한' : '허용'}</td>
       <td><button data-student="${html(student.student_id)}">상세</button></td></tr>`,
@@ -815,7 +831,6 @@ async function studentDetail(studentId, relatedLetterId = '') {
   if (!student) throw new Error('학생 정보를 찾지 못했습니다. 새로 불러오세요.');
   const container = $('#student-detail');
   container.innerHTML = `<section class="panel"><h2>${html(student.login_id || '현재 학번 미연결')} ${html(student.student_name)}</h2>
-    <small>기록 식별자 ${html(student.student_id)}</small>
     <p>${student.is_active ? '활성' : '비활성'} · 글 작성 ${writeRestricted(student) ? '제한' : '허용'}${student.blocked_until ? ` · 제한 종료 ${html(koreanDate(student.blocked_until.toDate().toISOString()))}` : ''}</p>
     <div id="student-actions">불러오는 중</div><div id="student-history"></div></section>`;
   container.scrollIntoView({ block: 'start' });
