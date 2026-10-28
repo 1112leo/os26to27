@@ -39,12 +39,18 @@ import {
   koreanDate,
   normalizeText,
 } from './common.js';
-import { rankResults, rankedAttempts, calculateScore, countKeystrokes } from './typing/scoring.js';
+import {
+  rankResults,
+  rankedAttempts,
+  calculateScore,
+  countKeystrokes,
+} from './typing/scoring.js';
 import {
   pendingResults,
   synchronizePending,
   listLocalResults,
   resultsCsv,
+  importResultFile,
 } from './typing/storage.js';
 import {
   readStudents,
@@ -61,7 +67,9 @@ import {
 
 const root = document.querySelector('#admin');
 const feature = document.body.dataset.feature;
-const featureTitle = { typing: '타자 관리', write: '글 관리', welcome: '공개 글 관리' }[feature];
+const featureTitle = { typing: '타자 관리', write: '글 관리', welcome: '공개 글 관리' }[
+  feature
+];
 const firstTab = feature === 'typing' ? 'records' : 'letters';
 const $ = (selector, scope = document) => scope.querySelector(selector);
 const labels = { pending: '검토 대기', approved: '승인', rejected: '제외' };
@@ -77,6 +85,7 @@ let sessionPolicy = { ...DEFAULT_SESSION_POLICY };
 let studentFilter = { query: '', grade: '' };
 let studentPage = 1;
 let studentDetailSequence = 0;
+let pendingStudentDetail = null;
 let config;
 let letterPage = 1;
 let resultPage = 1;
@@ -99,7 +108,9 @@ function dirtyForms(container = root) {
   const forms = container?.matches('form')
     ? [container]
     : [...(container?.querySelectorAll('form') ?? [])];
-  return forms.filter((form) => savedForms.has(form) && savedForms.get(form) !== formState(form));
+  return forms.filter(
+    (form) => savedForms.has(form) && savedForms.get(form) !== formState(form),
+  );
 }
 function confirmDiscard(container = root) {
   const forms = dirtyForms(container);
@@ -125,6 +136,7 @@ function applySession(next) {
   const entering = !session.authenticated || next.uid !== session.uid;
   session = next;
   if (!next.authenticated) {
+    pendingStudentDetail = null;
     letters = [];
     results = [];
     challenges = [];
@@ -135,6 +147,7 @@ function applySession(next) {
   else if ($('#identity')) $('#identity').textContent = next.email ?? '';
 }
 function sessionFailed(reason) {
+  pendingStudentDetail = null;
   session = { authenticated: false };
   letters = [];
   results = [];
@@ -268,7 +281,7 @@ async function renderTab() {
   try {
     const { db } = await adminContext();
     let loaded;
-    if (tab === 'letters') loaded = await readLetters(db);
+    if (tab === 'letters') loaded = await Promise.all([readLetters(db), readStudents(db)]);
     if (tab === 'records')
       loaded = await Promise.all([readTyping(db), readChallenges(db), readStudents(db)]);
     if (tab === 'settings')
@@ -277,10 +290,11 @@ async function renderTab() {
         readChallenges(db),
         readSessionPolicy(db),
       ]);
-    if (tab === 'students') loaded = await Promise.all([readStudents(db), readSessionPolicy(db)]);
+    if (tab === 'students')
+      loaded = await Promise.all([readStudents(db), readSessionPolicy(db)]);
     if (sequence !== viewSequence) return;
     if (tab === 'letters') {
-      letters = loaded;
+      [letters, students] = loaded;
       lettersView();
     } else if (tab === 'records') {
       [results, challenges, students] = loaded;
@@ -291,6 +305,12 @@ async function renderTab() {
     } else if (tab === 'students') {
       [students, sessionPolicy] = loaded;
       studentsView();
+      if (pendingStudentDetail) {
+        const requested = pendingStudentDetail;
+        pendingStudentDetail = null;
+        if (students.some((student) => student.student_id === requested.id))
+          await studentDetail(requested.id, requested.letterId);
+      }
     } else await accountView(db, sequence);
   } catch (reason) {
     if (sequence === viewSequence) {
@@ -376,7 +396,8 @@ function renderLetters() {
           .includes(letterFilter.query.toLowerCase()),
     )
     .sort(
-      (a, b) => (letterFilter.sort === 'asc' ? 1 : -1) * a.created_at.localeCompare(b.created_at),
+      (a, b) =>
+        (letterFilter.sort === 'asc' ? 1 : -1) * a.created_at.localeCompare(b.created_at),
     );
   letterPage = Math.min(letterPage, Math.max(1, Math.ceil(records.length / 20)));
   $('#letter-count').textContent = Object.entries(labels)
@@ -389,7 +410,8 @@ function renderLetters() {
         (letter) => `<article class="panel">
     <div class="section-top"><strong>${html(letter.nickname || '익명')}</strong><span>${html(labels[letter.status])}</span></div>
     <p class="letter-content">${html(letter.content)}</p><small>${html(koreanDate(letter.created_at))} · 순서 ${letter.publish_order ?? '미지정'}</small>
-    <div class="actions"><button data-edit="${letter.id}">수정·검수</button><button class="danger" data-delete="${letter.id}">삭제</button></div></article>`,
+    <p class="muted">${html(letterAuthor(letter))}</p>
+    <div class="actions"><button data-edit="${letter.id}">수정·검수</button>${students.some((student) => student.student_id === letter.owner_uid) ? `<button data-letter-student="${letter.id}">작성 계정 관리</button>` : ''}<button class="danger" data-delete="${letter.id}">삭제</button></div></article>`,
       )
       .join('') || '<p>글 없음</p>';
   document
@@ -415,6 +437,20 @@ function renderLetters() {
     letterPage = value;
     renderLetters();
   });
+  document.querySelectorAll('[data-letter-student]').forEach((button) => {
+    button.onclick = () => {
+      if (busy || !confirmDiscard()) return;
+      const letter = letters.find((item) => item.id === button.dataset.letterStudent);
+      pendingStudentDetail = { id: letter.owner_uid, letterId: letter.id };
+      location.hash = '#students';
+    };
+  });
+}
+function letterAuthor(letter) {
+  const student = students.find((item) => item.student_id === letter.owner_uid);
+  return student
+    ? `작성 계정: ${student.login_id || student.student_id} ${student.student_name}`
+    : '명부 연결 전·관리자 작성 기록';
 }
 function letterEditor(letter) {
   if (!confirmDiscard($('#editor'))) return;
@@ -472,7 +508,7 @@ async function recordsView() {
         ['attempts', '전체 시도'],
       ])}<button>검색</button></form>
     <div class="table-scroll" id="result-list"></div><div class="actions" id="pagination"></div>
-    <details class="panel"><summary>기기 백업</summary><p id="pending-count"></p><div class="actions"><button id="sync-pending">미전송 기록 접수</button><button id="local-json">기기 JSON</button></div></details>`;
+    <details class="panel"><summary>기기 백업</summary><p id="pending-count"></p><div class="actions"><button id="sync-pending">미전송 기록 접수</button><button id="local-json">기기 JSON</button><button id="import-results">기록 파일 불러오기</button><input id="result-file" type="file" accept=".json,application/json" hidden /></div></details>`;
   $('#new-result').onclick = () => resultEditor();
   $('#reload').onclick = renderTab;
   $('#result-filter').onsubmit = (event) => {
@@ -507,11 +543,37 @@ async function recordsView() {
     void run(async () => {
       downloadFile(
         'typing-local.json',
-        JSON.stringify({ schemaVersion: 1, results: await listLocalResults() }, null, 2),
+        JSON.stringify(
+          {
+            schemaVersion: 1,
+            projectId: (await adminContext()).db.app.options.projectId,
+            results: await listLocalResults(),
+          },
+          null,
+          2,
+        ),
         'application/json',
       );
       setStatus('다운로드 완료');
     });
+  $('#import-results').onclick = () => $('#result-file').click();
+  $('#result-file').onchange = (event) => {
+    const file = event.target.files?.[0];
+    event.target.value = '';
+    if (!file) return;
+    void run(async () => {
+      if (file.size > 5 * 1024 * 1024) throw new Error('5MB 이하의 기록 파일을 선택하세요.');
+      let input;
+      try {
+        input = JSON.parse(await file.text());
+      } catch {
+        throw new Error('JSON 기록 파일을 확인하세요.');
+      }
+      const count = await importResultFile(input);
+      await pendingCount();
+      setStatus(`${count}건을 불러왔습니다. 미전송 기록 접수로 서버에 저장하세요.`);
+    });
+  };
   renderResults();
   await pendingCount();
 }
@@ -571,7 +633,8 @@ function renderResults() {
           try {
             await reviewTyping((await adminContext()).db, id, patch);
           } catch (reason) {
-            control.value = results.find((item) => item.id === id)?.verificationStatus ?? 'pending';
+            control.value =
+              results.find((item) => item.id === id)?.verificationStatus ?? 'pending';
             throw reason;
           }
           Object.assign(
@@ -709,7 +772,9 @@ function renderStudents() {
         .toLocaleLowerCase()
         .includes(query) &&
       (!studentFilter.grade ||
-        (studentFilter.grade === 'other' ? grade === null : grade === Number(studentFilter.grade)))
+        (studentFilter.grade === 'other'
+          ? grade === null
+          : grade === Number(studentFilter.grade)))
     );
   });
   studentPage = Math.min(studentPage, Math.max(1, Math.ceil(filtered.length / 50)));
@@ -743,13 +808,14 @@ const moderationLabels = {
   activate: '계정 재활성화',
   reset_password: '비밀번호 재발급',
 };
-async function studentDetail(studentId) {
+async function studentDetail(studentId, relatedLetterId = '') {
   const detailSequence = ++studentDetailSequence;
   const sequence = viewSequence;
   const student = students.find((item) => item.student_id === studentId);
   if (!student) throw new Error('학생 정보를 찾지 못했습니다. 새로 불러오세요.');
   const container = $('#student-detail');
-  container.innerHTML = `<section class="panel"><h2>${html(student.student_id)} ${html(student.student_name)}</h2>
+  container.innerHTML = `<section class="panel"><h2>${html(student.login_id || '현재 학번 미연결')} ${html(student.student_name)}</h2>
+    <small>기록 식별자 ${html(student.student_id)}</small>
     <p>${student.is_active ? '활성' : '비활성'} · 글 작성 ${writeRestricted(student) ? '제한' : '허용'}${student.blocked_until ? ` · 제한 종료 ${html(koreanDate(student.blocked_until.toDate().toISOString()))}` : ''}</p>
     <div id="student-actions">불러오는 중</div><div id="student-history"></div></section>`;
   container.scrollIntoView({ block: 'start' });
@@ -772,7 +838,7 @@ async function studentDetail(studentId) {
       ],
     ])}
     ${field('blocked_until', '제한 종료 (비워두면 직접 해제)', '', 'datetime-local')}
-    ${select('related_letter_id', '관련 글', '', [['', '없음'], ...history.letters.map((letter) => [letter.id, `${koreanDate(letter.created_at?.toDate().toISOString() ?? '')} · ${letter.id}`])])}
+    ${select('related_letter_id', '관련 글', relatedLetterId, [['', '없음'], ...history.letters.map((letter) => [letter.id, `${koreanDate(letter.created_at?.toDate().toISOString() ?? '')} · ${letter.id}`])])}
     ${area('reason', '조치 사유', '', 3)}<button>적용</button></form>
     <form id="student-password"><h3>비밀번호 재발급</h3>${area('reason', '재발급 사유', '', 2)}<button${passwordReady ? '' : ' disabled'}>임시 비밀번호 발급</button>${passwordReady ? '' : '<p class="muted">비밀번호 재발급은 현재 보류 중입니다.</p>'}
     <p id="temporary-password" role="status" hidden></p><button id="clear-temporary-password" type="button" hidden>임시 비밀번호 숨기기</button></form>`;
@@ -797,7 +863,8 @@ async function studentDetail(studentId) {
   submit($('#student-password'), async (values) => {
     const result = await resetStudentPassword(studentId, values.reason);
     const output = $('#temporary-password');
-    if (sequence !== viewSequence || detailSequence !== studentDetailSequence || !output) return;
+    if (sequence !== viewSequence || detailSequence !== studentDetailSequence || !output)
+      return;
     output.textContent = `임시 비밀번호: ${result.password}`;
     output.hidden = false;
     $('#clear-temporary-password').hidden = false;
@@ -898,7 +965,10 @@ function renderChallenges() {
       return;
     }
     if (!confirmDiscard()) return;
-    if (button.dataset.delete && !confirm('문구를 삭제 목록에 보관할까요? 기존 기록은 유지됩니다.'))
+    if (
+      button.dataset.delete &&
+      !confirm('문구를 삭제 목록에 보관할까요? 기존 기록은 유지됩니다.')
+    )
       return;
     void run(async () => {
       await changeChallenge(
@@ -968,7 +1038,8 @@ async function accountView(db, sequence = viewSequence) {
     <form id="operator"><h3>관리자 추가</h3>${field('email', '이메일', '', 'email', 'required maxlength="254"')}${field('password', '초기 비밀번호', '', 'password', 'minlength="12" autocomplete="new-password"')}
     <details><summary>기존 계정에 권한 추가</summary>${field('uid', '기존 UID', '', 'text', 'maxlength="128"')}</details><button>추가</button></form></section>`;
   submit($('#password'), async (values) => {
-    if (values.next !== values.confirmation) throw new Error('비밀번호 확인이 일치하지 않습니다.');
+    if (values.next !== values.confirmation)
+      throw new Error('비밀번호 확인이 일치하지 않습니다.');
     await changeAdminPassword(values.current, values.next);
     $('#password').reset();
     setStatus('비밀번호 변경 완료');

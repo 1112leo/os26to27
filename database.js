@@ -27,9 +27,11 @@ export async function payloadHash(payload) {
     'SHA-256',
     new TextEncoder().encode(JSON.stringify(payload)),
   );
-  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join('');
+  return Array.from(new Uint8Array(bytes), (byte) => byte.toString(16).padStart(2, '0')).join(
+    '',
+  );
 }
-async function createOnce(db, uid, id, kind, payload) {
+async function createOnce(db, uid, id, kind, payload, ownerUid = uid) {
   const hash = await payloadHash(payload);
   return withDeadline(
     runTransaction(db, async (tx) => {
@@ -68,14 +70,14 @@ async function createOnce(db, uid, id, kind, payload) {
       });
       tx.set(receiptRef, {
         id,
-        owner_uid: uid,
+        owner_uid: ownerUid,
         kind,
         payload_hash: hash,
         created_at: serverTimestamp(),
       });
       tx.set(doc(db, kind === 'letter' ? 'letters' : 'typingResults', id), {
         ...payload,
-        owner_uid: uid,
+        owner_uid: ownerUid,
         [kind === 'letter' ? 'created_at' : 'received_at']: serverTimestamp(),
       });
       return {
@@ -141,6 +143,14 @@ export async function submitTyping(db, uid, result, { asAdmin = false } = {}) {
       throw new ClientError('로그인 계정과 참가 정보가 일치하지 않습니다.', 403);
   }
   validateTypingResult(result, await readChallenge(db, result.challengeId));
+  const ownerUid = asAdmin && result.owner_uid ? result.owner_uid : uid;
+  if (asAdmin && ownerUid !== uid) {
+    if (!/^[0-9]{7}$/.test(ownerUid) || result.participantId !== ownerUid)
+      throw new ClientError('복구할 기록의 작성 계정이 일치하지 않습니다.', 400);
+    const original = await withDeadline(getDoc(doc(db, 'students', ownerUid)));
+    if (original.data()?.student_id !== ownerUid)
+      throw new ClientError('원래 학생 계정의 명부를 확인해 주세요.', 400);
+  }
   const payload = {
     id: result.id,
     participantId: normalizeText(result.participantId),
@@ -156,7 +166,7 @@ export async function submitTyping(db, uid, result, { asAdmin = false } = {}) {
     verificationStatus: 'pending',
     reviewed_at: null,
   };
-  return createOnce(db, uid, result.id, 'typing', payload);
+  return createOnce(db, uid, result.id, 'typing', payload, ownerUid);
 }
 export const dateString = (value) =>
   value instanceof Timestamp
@@ -190,6 +200,7 @@ function decodeLetter(snapshot) {
   const data = snapshot.data();
   return {
     id: snapshot.id,
+    owner_uid: data.owner_uid,
     nickname: data.nickname,
     content: data.content,
     published_content: data.published_content,
@@ -230,7 +241,9 @@ function letterEdit(input) {
     submissionKey: crypto.randomUUID(),
   });
   if (!value) throw new ClientError(error, 400);
-  const published = input.published_content ? normalizeText(input.published_content) || null : null;
+  const published = input.published_content
+    ? normalizeText(input.published_content) || null
+    : null;
   if (published && unicodeLength(published) > 700)
     throw new ClientError('공개용 본문은 700자 이내입니다.', 400);
   if (
@@ -424,7 +437,8 @@ export async function readChallenges(db) {
     const data = snapshot.data();
     return {
       challengeId: snapshot.id,
-      title: data.title || (snapshot.id === CHALLENGE.challengeId ? CHALLENGE.title : snapshot.id),
+      title:
+        data.title || (snapshot.id === CHALLENGE.challengeId ? CHALLENGE.title : snapshot.id),
       text: data.text,
       referenceKeystrokes: data.referenceKeystrokes,
       practice: data.practice,
@@ -524,23 +538,29 @@ export function encodeFirestore(value) {
 }
 export async function createPrivateBackup(db) {
   const collections = {};
-  for (const name of ['letters', 'typingResults', 'receipts', 'challenges', 'publicLetters']) {
+  for (const name of [
+    'letters',
+    'typingResults',
+    'receipts',
+    'challenges',
+    'publicLetters',
+    'students',
+    'moderationLogs',
+  ]) {
     collections[name] = (await allDocuments(db, name)).map((snapshot) => ({
       id: snapshot.id,
       data: encodeFirestore(snapshot.data()),
     }));
   }
-  const event = await withDeadline(getDoc(doc(db, 'settings', 'event')));
-  collections.settings = event.exists()
-    ? [
-        {
-          id: event.id,
-          data: encodeFirestore(event.data()),
-        },
-      ]
-    : [];
+  const settings = await Promise.all(
+    ['event', 'sessionPolicy'].map((id) => withDeadline(getDoc(doc(db, 'settings', id)))),
+  );
+  collections.settings = settings
+    .filter((snapshot) => snapshot.exists())
+    .map((snapshot) => ({ id: snapshot.id, data: encodeFirestore(snapshot.data()) }));
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
+    includesAuthentication: false,
     backend: 'firebase',
     projectId: db.app.options.projectId,
     exportedAt: new Date().toISOString(),
@@ -550,12 +570,14 @@ export async function createPrivateBackup(db) {
 export async function exportFirebase(scope, format) {
   const { db } = await adminContext();
   let content;
-  if (scope === 'public') content = JSON.stringify(makePublicData(await readLetters(db)), null, 2);
+  if (scope === 'public')
+    content = JSON.stringify(makePublicData(await readLetters(db)), null, 2);
   else if (format === 'csv') {
     const letters = await readLetters(db);
     content = toCsv([
       [
         'ID',
+        '작성 계정 UID',
         '별명',
         '원문',
         '공개용 본문',
@@ -568,6 +590,7 @@ export async function exportFirebase(scope, format) {
       ],
       ...letters.map((letter) => [
         letter.id,
+        letter.owner_uid,
         letter.nickname,
         letter.content,
         letter.published_content,

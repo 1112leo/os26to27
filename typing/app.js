@@ -1,6 +1,7 @@
 import { getClients, errorMessage } from '../firebase.js';
 import { readEvent, readChallenge } from '../database.js';
 import { mountLogin } from '../login.js';
+import { downloadFile } from '../common.js';
 import {
   initialInputState,
   commitInput,
@@ -25,6 +26,8 @@ const elements = Object.fromEntries(
     'feedback',
     'result',
     'retry',
+    'rescue',
+    'rescue-confirm',
     'reference-keys',
   ].map((id) => [id, document.getElementById(id)]),
 );
@@ -43,6 +46,8 @@ let result = null;
 let spans = [];
 let timer = null;
 let sessionVersion = 0;
+let needsBackup = false;
+let filePrepared = false;
 
 function message(text, isError = false) {
   elements.feedback.textContent = text;
@@ -53,6 +58,8 @@ function updateControls() {
   const active = status === 'armed' || status === 'running';
   elements['typing-input'].disabled = !participant || loading || !active;
   elements.retry.hidden = status !== 'failed';
+  elements.rescue.hidden = status !== 'failed' || !needsBackup;
+  elements['rescue-confirm'].hidden = status !== 'failed' || !needsBackup || !filePrepared;
   elements['attempt-status'].textContent = {
     ready: '',
     armed: '첫 입력 대기',
@@ -155,12 +162,19 @@ async function persist(record) {
   try {
     await saveResult(record);
     if (version !== sessionVersion) return;
+    needsBackup = false;
     transition('saved');
     message('저장 완료');
   } catch (reason) {
     if (version === sessionVersion) {
+      needsBackup = reason.backupSaved === false;
       transition('failed');
-      message(errorMessage(reason), true);
+      message(
+        needsBackup
+          ? '기록을 보관하지 못했습니다. 파일로 저장한 뒤 운영진에게 전달하세요.'
+          : errorMessage(reason),
+        true,
+      );
     }
   } finally {
     saving = false;
@@ -210,7 +224,11 @@ async function prepareAttempt() {
   try {
     const current = await refresh();
     if (version !== sessionVersion) return;
-    if (!current.config.typingEnabled || !current.challenge.enabled || current.challenge.deleted) {
+    if (
+      !current.config.typingEnabled ||
+      !current.challenge.enabled ||
+      current.challenge.deleted
+    ) {
       message('현재 접수할 수 없습니다.', true);
       return;
     }
@@ -272,11 +290,38 @@ elements.reload.addEventListener('click', () => {
 elements.retry.addEventListener('click', () => {
   if (result) void persist(result);
 });
+elements.rescue.addEventListener('click', async () => {
+  if (!result || !needsBackup) return;
+  try {
+    const { projectId } = await getClients();
+    downloadFile(
+      `typing-${result.id}.json`,
+      JSON.stringify(
+        { schemaVersion: 1, projectId, results: [{ ...result, syncState: 'pending' }] },
+        null,
+        2,
+      ),
+      'application/json',
+    );
+    filePrepared = true;
+    updateControls();
+  } catch (reason) {
+    message(errorMessage(reason), true);
+  }
+});
+elements['rescue-confirm'].addEventListener('click', () => {
+  if (!filePrepared) return;
+  needsBackup = false;
+  updateControls();
+  message('저장한 기록 파일을 운영진에게 전달하세요.');
+});
 function clearAttempt() {
   attempt = null;
   engine = initialInputState();
   startedAt = null;
   result = null;
+  needsBackup = false;
+  filePrepared = false;
   elapsed = 0;
   input.value = '';
   elements.elapsed.textContent = '0.0';
@@ -299,12 +344,16 @@ mountLogin({
   },
   canLogout() {
     if (loading || saving) return false;
+    if (needsBackup)
+      return confirm(
+        '파일로 보관하지 않은 기록이 있습니다. 기록을 남기지 않고 로그아웃할까요?',
+      );
     if (['running', 'failed'].includes(status))
       return confirm('진행 중인 기록을 닫고 로그아웃할까요?');
     return true;
   },
   canAutoLogout() {
-    return !loading && !saving && status !== 'running';
+    return !loading && !saving && !needsBackup && status !== 'running';
   },
   onLogout() {
     sessionVersion++;

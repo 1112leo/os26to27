@@ -19,6 +19,7 @@ import {
   deleteUser,
   inMemoryPersistence,
   setPersistence,
+  updateCurrentUser,
 } from 'https://www.gstatic.com/firebasejs/13.1.0/firebase-auth.js';
 import {
   connectFirestoreEmulator,
@@ -54,7 +55,11 @@ export function firebaseError(error) {
   if (code.includes('too-many-requests'))
     return new ClientError('로그인 요청이 많습니다. 잠시 후 다시 시도해 주세요.', 429, code);
   if (code.includes('weak-password') || code.includes('password-does-not-meet-requirements'))
-    return new ClientError('새 비밀번호가 너무 약합니다. 12자 이상으로 입력해 주세요.', 400, code);
+    return new ClientError(
+      '새 비밀번호가 너무 약합니다. 12자 이상으로 입력해 주세요.',
+      400,
+      code,
+    );
   if (code.includes('email-already-in-use'))
     return new ClientError(
       '이미 사용 중인 이메일입니다. 다른 이메일을 사용하거나 기존 계정 UID로 권한을 추가해 주세요.',
@@ -66,7 +71,11 @@ export function firebaseError(error) {
   if (code.includes('requires-recent-login'))
     return new ClientError('다시 로그인한 뒤 계정 변경을 시도해 주세요.', 401, code);
   if (code.includes('expired-action-code') || code.includes('invalid-action-code'))
-    return new ClientError('만료되었거나 이미 사용한 링크입니다. 새 메일을 요청하세요.', 400, code);
+    return new ClientError(
+      '만료되었거나 이미 사용한 링크입니다. 새 메일을 요청하세요.',
+      400,
+      code,
+    );
   if (code.includes('permission-denied'))
     return new ClientError(
       '저장 권한, 행사 운영 상태 또는 요청 제한을 확인해 주세요. 입력 내용은 유지됩니다.',
@@ -114,6 +123,85 @@ export async function withDeadline(promise, milliseconds = 20000) {
 }
 export const errorMessage = (error) => firebaseError(error).message;
 let clients = null;
+let authGeneration = 0;
+const authIntents = { student: 0, admin: 0 };
+let authMutations = Promise.resolve();
+
+function nextLogin(kind) {
+  const generation = ++authGeneration;
+  authIntents.student = generation;
+  authIntents.admin = generation;
+  return { kind, generation };
+}
+function invalidateLogin(kind) {
+  authIntents[kind] = ++authGeneration;
+  return authIntents[kind];
+}
+function requireCurrentLogin(intent) {
+  if (authIntents[intent.kind] !== intent.generation)
+    throw new ClientError(
+      '로그인 요청이 취소되었습니다. 다시 로그인하세요.',
+      409,
+      'AUTH_CANCELLED',
+    );
+}
+function mutateAuth(work) {
+  const result = authMutations.then(work, work);
+  authMutations = result.catch(() => {});
+  return result;
+}
+async function temporaryLogin(clients, intent, email, password, verify) {
+  const app = initializeApp(
+    clients.adminDb.app.options,
+    `ohsung-login-${intent.kind}-${crypto.randomUUID()}`,
+  );
+  let auth;
+  let closed = false;
+  try {
+    auth = initializeAuth(app, { persistence: inMemoryPersistence });
+    const db = getFirestore(app);
+    if (clients.emulator) {
+      connectAuthEmulator(auth, 'http://127.0.0.1:9098', { disableWarnings: true });
+      connectFirestoreEmulator(db, '127.0.0.1', 8088);
+    }
+    // The request may finish after our timeout. Only this unobserved memory Auth may change.
+    const validation = (async () => {
+      const { user } = await signInWithEmailAndPassword(auth, email, password);
+      requireCurrentLogin(intent);
+      if (closed) throw new ClientError('로그인 요청이 만료되었습니다.', 408, 'DEADLINE');
+      const session = await verify(user, db);
+      requireCurrentLogin(intent);
+      if (closed) throw new ClientError('로그인 요청이 만료되었습니다.', 408, 'DEADLINE');
+      return { user, session };
+    })();
+    const { user, session } = await withDeadline(validation);
+    return await mutateAuth(async () => {
+      requireCurrentLogin(intent);
+      const target = intent.kind === 'student' ? clients.studentAuth : clients.adminAuth;
+      await updateCurrentUser(target, user);
+      try {
+        requireCurrentLogin(intent);
+      } catch (reason) {
+        // Finish clearing this publication before a newer login or logout may mutate Auth.
+        await signOut(target);
+        throw reason;
+      }
+      return session;
+    });
+  } finally {
+    closed = true;
+    if (auth) await signOut(auth).catch(() => {});
+    await deleteApp(app).catch(() => {});
+  }
+}
+async function clearLoginSessions(clients, intent) {
+  await mutateAuth(async () => {
+    requireCurrentLogin(intent);
+    await signOut(clients.adminAuth);
+    if (intent.kind === 'student') await signOut(clients.studentAuth);
+    requireCurrentLogin(intent);
+  });
+}
 async function initialize() {
   const emulator =
     ['localhost', '127.0.0.1'].includes(location.hostname) &&
@@ -270,29 +358,34 @@ export async function studentSession() {
   return studentProfile(user, record.data(), clients.projectId);
 }
 export async function loginStudent(id, password) {
+  const intent = nextLogin('student');
   const clients = await getClients();
   await clients.policyTransition;
-  await signOut(clients.adminAuth);
-  await signOut(clients.studentAuth);
+  await clearLoginSessions(clients, intent);
   try {
-    const { user } = await withDeadline(
-      signInWithEmailAndPassword(
-        clients.studentAuth,
-        studentEmail(id, clients.projectId),
-        password,
-      ),
+    return await temporaryLogin(
+      clients,
+      intent,
+      studentEmail(id, clients.projectId),
+      password,
+      async (user, db) => {
+        const record = await getDoc(doc(db, 'students', user.uid));
+        const profile = studentProfile(user, record.data(), clients.projectId);
+        if ((id.length === 7 && user.uid !== id) || (id.length === 5 && profile.loginId !== id))
+          throw new ClientError('계정을 사용할 수 없습니다. 운영진에게 문의하세요.', 403);
+        return profile;
+      },
     );
-    const profile = await studentSession();
-    if ((id.length === 7 && user.uid !== id) || (id.length === 5 && profile?.loginId !== id))
-      throw new ClientError('계정을 사용할 수 없습니다. 운영진에게 문의하세요.', 403);
-    return profile;
   } catch (reason) {
-    await signOut(clients.studentAuth);
     throw firebaseError(reason);
   }
 }
 export async function logoutStudent() {
-  await signOut((await getClients()).studentAuth);
+  const generation = invalidateLogin('student');
+  const { studentAuth } = await getClients();
+  await mutateAuth(async () => {
+    if (authIntents.student === generation) await signOut(studentAuth);
+  });
 }
 export async function studentContext({ writing = false } = {}) {
   const student = await studentSession();
@@ -320,12 +413,15 @@ export async function watchStudentSession(onChange, onError) {
       doc(clients.studentDb, 'students', user.uid),
       (snapshot) => {
         if (current !== sequence) return;
+        let profile;
         try {
-          onChange(studentProfile(user, snapshot.data(), clients.projectId));
+          profile = studentProfile(user, snapshot.data(), clients.projectId);
         } catch (reason) {
           void logoutStudent();
           onError(reason);
+          return;
         }
+        onChange(profile);
       },
       (reason) => {
         if (current === sequence) {
@@ -349,14 +445,21 @@ export async function watchSessionPolicy(onChange, onError) {
       const next = sessionPolicy(snapshot.data());
       const changed = next.boothMode !== clients.policy.boothMode;
       Object.assign(clients.policy, next);
-      if (changed)
-        clients.policyTransition = (async () => {
-          await setPersistence(
-            clients.studentAuth,
-            next.boothMode ? inMemoryPersistence : browserSessionPersistence,
-          );
-          await logoutStudent();
-        })().catch(onError);
+      if (changed) {
+        invalidateLogin('student');
+        clients.policyTransition = mutateAuth(async () => {
+          try {
+            await setPersistence(
+              clients.studentAuth,
+              next.boothMode ? inMemoryPersistence : browserSessionPersistence,
+            );
+          } finally {
+            await signOut(clients.studentAuth);
+          }
+        });
+        // Keep a failed transition rejected so a later login cannot use the old persistence.
+        void clients.policyTransition.catch(onError);
+      }
       onChange(next);
     },
     onError,
@@ -387,17 +490,26 @@ export async function adminContext() {
   };
 }
 export async function loginAdmin(email, password) {
-  const { adminAuth } = await getClients();
-  await withDeadline(signInWithEmailAndPassword(adminAuth, email.trim(), password));
-  const session = await adminSession();
-  if (!session.authenticated) {
-    await signOut(adminAuth);
-    throw new ClientError('관리자 권한이 없는 계정입니다.', 403, 'NOT_ADMIN');
+  const intent = nextLogin('admin');
+  const clients = await getClients();
+  await clearLoginSessions(clients, intent);
+  try {
+    return await temporaryLogin(clients, intent, email.trim(), password, async (user, db) => {
+      const role = await getDoc(doc(db, 'admins', user.uid));
+      if (role.data()?.enabled !== true)
+        throw new ClientError('관리자 권한이 없는 계정입니다.', 403, 'NOT_ADMIN');
+      return { authenticated: true, uid: user.uid, email: user.email ?? undefined };
+    });
+  } catch (reason) {
+    throw firebaseError(reason);
   }
-  return session;
 }
 export async function logoutAdmin() {
-  await signOut((await getClients()).adminAuth);
+  const generation = invalidateLogin('admin');
+  const { adminAuth } = await getClients();
+  await mutateAuth(async () => {
+    if (authIntents.admin === generation) await signOut(adminAuth);
+  });
   return {
     authenticated: false,
   };
@@ -491,7 +603,7 @@ export async function watchAdminSession(onChange, onError) {
   const { adminAuth } = await getClients();
   let sequence = 0;
   let previousUid = null;
-  return onIdTokenChanged(adminAuth, (user) => {
+  const stop = onIdTokenChanged(adminAuth, (user) => {
     const current = ++sequence;
     if (!user || user.uid !== previousUid)
       onChange({
@@ -506,6 +618,10 @@ export async function watchAdminSession(onChange, onError) {
         if (current === sequence) onError(error);
       });
   });
+  return () => {
+    sequence++;
+    stop();
+  };
 }
 
 export {

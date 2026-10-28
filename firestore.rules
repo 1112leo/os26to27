@@ -44,7 +44,15 @@ service cloud.firestore {
     }
     function newReceipt(id, kind) {
       let receipt = getAfter(/databases/$(database)/documents/receipts/$(id)).data;
-      return receipt.id == id && receipt.kind == kind && receipt.owner_uid == request.auth.uid && receipt.created_at == request.time;
+      return receipt.id == id && receipt.kind == kind && receipt.created_at == request.time
+        && (receipt.owner_uid == request.auth.uid || (kind == 'typing' && recoveryOwner(getAfter(/databases/$(database)/documents/typingResults/$(id)).data)
+          && receipt.owner_uid == getAfter(/databases/$(database)/documents/typingResults/$(id)).data.owner_uid));
+    }
+    function recoveryOwner(data) {
+      return admin() && data.owner_uid is string && data.owner_uid.matches('[0-9]{7}')
+        && data.participantId == data.owner_uid
+        && exists(/databases/$(database)/documents/students/$(data.owner_uid))
+        && get(/databases/$(database)/documents/students/$(data.owner_uid)).data.student_id == data.owner_uid;
     }
     function freshRate(id, kind) {
       let rate = getAfter(/databases/$(database)/documents/rateLimits/$(request.auth.uid)).data;
@@ -197,14 +205,15 @@ service cloud.firestore {
       function targetExists(data) {
         return data.kind == 'letter'
           ? getAfter(/databases/$(database)/documents/letters/$(id)).data.created_at == request.time
-            && getAfter(/databases/$(database)/documents/letters/$(id)).data.owner_uid == request.auth.uid
+            && getAfter(/databases/$(database)/documents/letters/$(id)).data.owner_uid == data.owner_uid
           : getAfter(/databases/$(database)/documents/typingResults/$(id)).data.received_at == request.time
-            && getAfter(/databases/$(database)/documents/typingResults/$(id)).data.owner_uid == request.auth.uid;
+            && getAfter(/databases/$(database)/documents/typingResults/$(id)).data.owner_uid == data.owner_uid;
       }
       // Receipts contain only receipt metadata, never a student's original text or name.
       allow get: if signedIn() && (!exists(/databases/$(database)/documents/receipts/$(id)) || resource.data.owner_uid == request.auth.uid || admin());
       allow create: if (admin() || student()) && uuid(id) && request.resource.data.keys().hasOnly(['id', 'owner_uid', 'kind', 'payload_hash', 'created_at'])
-        && request.resource.data.id == id && request.resource.data.owner_uid == request.auth.uid
+        && request.resource.data.id == id && (request.resource.data.owner_uid == request.auth.uid
+          || (request.resource.data.kind == 'typing' && recoveryOwner(getAfter(/databases/$(database)/documents/typingResults/$(id)).data)))
         && request.resource.data.kind in ['letter', 'typing'] && request.resource.data.created_at == request.time
         && request.resource.data.payload_hash is string && request.resource.data.payload_hash.matches('[0-9a-f]{64}')
         && targetExists(request.resource.data) && freshRate(id, request.resource.data.kind);
@@ -280,11 +289,11 @@ service cloud.firestore {
       allow read: if admin();
       // Operators may recover queued booth records after the public event closes.
       allow create: if signedIn() && valid(request.resource.data)
-        && request.resource.data.owner_uid == request.auth.uid && request.resource.data.received_at == request.time
+        && (request.resource.data.owner_uid == request.auth.uid || recoveryOwner(request.resource.data)) && request.resource.data.received_at == request.time
         && ((admin() && request.resource.data.reviewed_at == request.time)
           || ((admin() || (studentTyping(request.resource.data) && eventOpen('typing'))) && request.resource.data.prizeReceived == false
             && request.resource.data.verificationStatus == 'pending' && request.resource.data.reviewed_at == null
-            && get(/databases/$(database)/documents/challenges/$(request.resource.data.challengeId)).data.enabled == true
+            && (admin() || get(/databases/$(database)/documents/challenges/$(request.resource.data.challengeId)).data.enabled == true)
             && newReceipt(id, 'typing')));
       allow update: if admin() && valid(request.resource.data)
         && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['participantId', 'displayName', 'challengeId', 'practice', 'elapsedMs', 'speed', 'errors', 'score', 'prizeReceived', 'verificationStatus', 'reviewed_at'])

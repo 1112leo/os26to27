@@ -1,5 +1,5 @@
 import { adminContext, studentContext, firebaseError } from '../firebase.js';
-import { submitTyping } from '../database.js';
+import { submitTyping, readChallenge, validateTypingResult } from '../database.js';
 
 import { toCsv } from '../common.js';
 import { rankResults, rankedAttempts } from './scoring.js';
@@ -29,7 +29,9 @@ export async function saveLocalResult(result) {
       tx.objectStore(STORE).put(result);
       tx.oncomplete = () => resolve();
       tx.onerror = tx.onabort = () =>
-        reject(new Error('기록을 저장하지 못했습니다. 결과를 내려받고 운영진에게 알려 주세요.'));
+        reject(
+          new Error('기록을 저장하지 못했습니다. 결과를 내려받고 운영진에게 알려 주세요.'),
+        );
     });
   } finally {
     db.close();
@@ -115,11 +117,46 @@ export async function saveResult(result, asAdmin = false) {
   } catch (error) {
     try {
       await saveLocalResult({ ...queued, syncError: firebaseError(error).message });
+      backupSaved = true;
     } catch {
       /* Result remains in the active UI for emergency download. */
     }
-    throw firebaseError(error);
+    throw Object.assign(firebaseError(error), { backupSaved });
   }
+}
+export async function importResultFile(input) {
+  const { db } = await adminContext();
+  if (
+    !input ||
+    input.schemaVersion !== 1 ||
+    !Array.isArray(input.results) ||
+    !input.results.length ||
+    input.results.length > 10000
+  )
+    throw new Error('타자 기록 파일의 형식을 확인하세요.');
+  if (input.projectId && input.projectId !== db.app.options.projectId)
+    throw new Error('다른 프로젝트의 기록 파일입니다.');
+  const challenges = new Map();
+  const ids = new Set();
+  const records = [];
+  for (const item of input.results) {
+    if (!item || typeof item !== 'object' || ids.has(item.id) || item.errors > 10000)
+      throw new Error('중복되거나 올바르지 않은 기록입니다.');
+    ids.add(item.id);
+    if (
+      item.owner_uid &&
+      (!/^[0-9]{7}$/.test(item.owner_uid) || item.participantId !== item.owner_uid)
+    )
+      throw new Error('원래 작성 계정이 다른 기록입니다.');
+    if (!challenges.has(item.challengeId))
+      challenges.set(item.challengeId, await readChallenge(db, item.challengeId));
+    const record = { ...item, prizeReceived: false, syncState: 'pending' };
+    validateTypingResult(record, challenges.get(item.challengeId));
+    records.push(record);
+  }
+  // 입력 전체를 검사한 뒤 기기 보관함에 추가합니다. 서버 접수는 별도 작업입니다.
+  for (const record of records) await saveLocalResult(record);
+  return records.length;
 }
 
 export async function pendingResults() {
