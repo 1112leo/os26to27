@@ -54,7 +54,10 @@ export const resetStudentPassword = onCall(
     const projectId = process.env.GCLOUD_PROJECT || process.env.GOOGLE_CLOUD_PROJECT;
     if (!projectId) throw new HttpsError('failed-precondition', '서버 프로젝트 설정을 확인하세요.');
     const account = await auth.getUser(studentId).catch(() => null);
-    if (!account || account.email !== `${studentId}@students.${projectId}.invalid`)
+    if (
+      !account ||
+      account.email !== `${target.data().login_id || studentId}@students.${projectId}.invalid`
+    )
       throw new HttpsError('failed-precondition', '학생 Auth 계정과 명부가 일치하지 않습니다.');
     const operationId = randomUUID();
     const lock = db.doc(`_studentPasswordResets/${studentId}`);

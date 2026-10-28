@@ -13,9 +13,10 @@ export function loginKind(value) {
   const id = String(value ?? '')
     .normalize('NFKC')
     .trim();
-  if (/^[0-9]{7}$/.test(id)) return { kind: 'student', id };
+  // 현재 학번은 5자리이며, 명부 연결 전 계정의 기존 7자리 식별자도 유지합니다.
+  if (/^[0-9]{5}$/.test(id) || /^[0-9]{7}$/.test(id)) return { kind: 'student', id };
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(id)) return { kind: 'admin', id };
-  throw new Error('학번 7자리 또는 이메일을 입력하세요.');
+  throw new Error('학번을 확인해 주세요.');
 }
 
 export function mountLogin({
@@ -61,7 +62,9 @@ export function mountLogin({
     student = value;
     $('#login-panel').hidden = !!value;
     $('#student-session').hidden = !value;
-    $('#student-name').textContent = value ? `${value.studentId} ${value.name}` : '';
+    $('#student-name').textContent = value
+      ? `${value.loginId || value.studentId} ${value.name}`
+      : '';
     if (value) {
       lastActivity = Date.now();
       onStudent({ ...value });

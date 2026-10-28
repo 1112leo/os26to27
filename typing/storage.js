@@ -57,6 +57,7 @@ export function resultsCsv(results, { rankedOnly = true } = {}) {
       '순위',
       '학번',
       '이름',
+      '기록 학번',
       '문구 버전',
       '소요 시간(ms)',
       '타수',
@@ -69,8 +70,9 @@ export function resultsCsv(results, { rankedOnly = true } = {}) {
     ],
     ...records.map((r) => [
       r.rank,
-      r.participantId,
+      r.loginId || r.participantId,
       r.displayName,
+      r.participantId,
       r.challengeId,
       r.elapsedMs,
       r.speed,

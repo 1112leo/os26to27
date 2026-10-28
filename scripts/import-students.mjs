@@ -52,7 +52,7 @@ function sameIdentity(data, student) {
   );
 }
 
-function validDocument(data, student) {
+export function validDocument(data, student) {
   const fields = [
     'student_id',
     'student_name',
@@ -66,7 +66,11 @@ function validDocument(data, student) {
   return (
     sameIdentity(data, student) &&
     fields.every((key) => Object.hasOwn(data, key)) &&
-    Object.keys(data).every((key) => fields.includes(key) || key === 'last_moderation_id') &&
+    Object.keys(data).every(
+      (key) => fields.includes(key) || key === 'last_moderation_id' || key === 'login_id',
+    ) &&
+    (!Object.hasOwn(data, 'login_id') ||
+      (typeof data.login_id === 'string' && /^[1-3][0-9]{4}$/.test(data.login_id))) &&
     (!Object.hasOwn(data, 'last_moderation_id') ||
       (typeof data.last_moderation_id === 'string' &&
         /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(
@@ -94,13 +98,15 @@ function matchesAuth(user, email, student) {
 }
 
 export async function inspectStudent(auth, db, student, projectId) {
-  const email = studentEmail(student.student_id, projectId);
   const [user, profile, admin] = await Promise.all([
     authUser(auth, student.student_id),
     db.doc(`students/${student.student_id}`).get(),
     db.doc(`admins/${student.student_id}`).get(),
   ]);
   if (admin.exists) throw new Error('ADMIN_UID_CONFLICT');
+  if (profile.exists && !validDocument(profile.data(), student))
+    throw new Error('STUDENT_DOCUMENT_CONFLICT');
+  const email = studentEmail(profile.data()?.login_id ?? student.student_id, projectId);
   if (user && !matchesAuth(user, email, student)) throw new Error('AUTH_IDENTITY_CONFLICT');
   try {
     const existingEmail = await auth.getUserByEmail(email);
@@ -108,8 +114,6 @@ export async function inspectStudent(auth, db, student, projectId) {
   } catch (error) {
     if (error.code !== 'auth/user-not-found') throw error;
   }
-  if (profile.exists && !validDocument(profile.data(), student))
-    throw new Error('STUDENT_DOCUMENT_CONFLICT');
   // This importer creates Auth first. A document without Auth is an external inconsistency.
   if (profile.exists && !user) throw new Error('AUTH_MISSING_FOR_EXISTING_PROFILE');
   return {
@@ -239,13 +243,13 @@ export async function retryFileOperation(
   }
 }
 
-function outsideSource(path) {
+export function outsideSource(path) {
   const child = relative(sourceRoot, path);
   const escapes = child === '..' || child.startsWith('..' + sep) || isAbsolute(child);
   if (!child || !escapes) throw new Error('PRIVATE_FILE_MUST_BE_OUTSIDE_REPOSITORY');
 }
 
-async function privateOutput(path) {
+export async function privateOutput(path) {
   const actual = resolve(await realpath(dirname(path)), path.split(/[\\/]/).at(-1));
   outsideSource(actual);
   try {

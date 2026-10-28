@@ -269,7 +269,8 @@ async function renderTab() {
     const { db } = await adminContext();
     let loaded;
     if (tab === 'letters') loaded = await readLetters(db);
-    if (tab === 'records') loaded = await Promise.all([readTyping(db), readChallenges(db)]);
+    if (tab === 'records')
+      loaded = await Promise.all([readTyping(db), readChallenges(db), readStudents(db)]);
     if (tab === 'settings')
       loaded = await Promise.all([
         readEvent(db).catch(() => null),
@@ -282,7 +283,7 @@ async function renderTab() {
       letters = loaded;
       lettersView();
     } else if (tab === 'records') {
-      [results, challenges] = loaded;
+      [results, challenges, students] = loaded;
       await recordsView();
     } else if (tab === 'settings') {
       [config, challenges, sessionPolicy] = loaded;
@@ -524,12 +525,15 @@ async function pendingCount() {
   }
 }
 function scopedResults() {
-  return results.filter(
-    (item) =>
-      item.challengeId === resultFilter.version &&
-      (resultFilter.verification === 'all' ||
-        item.verificationStatus === resultFilter.verification),
-  );
+  const aliases = new Map(students.map((student) => [student.student_id, student.login_id]));
+  return results
+    .filter(
+      (item) =>
+        item.challengeId === resultFilter.version &&
+        (resultFilter.verification === 'all' ||
+          item.verificationStatus === resultFilter.verification),
+    )
+    .map((item) => ({ ...item, loginId: aliases.get(item.participantId) ?? null }));
 }
 function filteredResults() {
   return resultFilter.view === 'attempts'
@@ -539,7 +543,7 @@ function filteredResults() {
 function renderResults() {
   const ranked = filteredResults();
   const records = ranked.filter((item) =>
-    `${item.participantId} ${item.displayName}`
+    `${item.loginId ?? ''} ${item.participantId} ${item.displayName}`
       .toLowerCase()
       .includes(resultFilter.query.toLowerCase()),
   );
@@ -549,7 +553,7 @@ function renderResults() {
       .slice((resultPage - 1) * 50, resultPage * 50)
       .map(
         (item) => `<tr>
-    <td>${item.rank ?? '—'}${item.practice ? ' (연습)' : ''}</td><td>${html(item.displayName)}<small>${html(item.participantId)}</small></td><td>${item.score}</td><td>${item.speed} / ${item.errors}</td><td>${(item.elapsedMs / 1000).toFixed(2)}초</td>
+    <td>${item.rank ?? '—'}${item.practice ? ' (연습)' : ''}</td><td>${html(item.displayName)}<small>${html(item.loginId || item.participantId)}</small></td><td>${item.score}</td><td>${item.speed} / ${item.errors}</td><td>${(item.elapsedMs / 1000).toFixed(2)}초</td>
     <td>${select(`review-${item.id}`, '확인', item.verificationStatus ?? 'pending', Object.entries(verification))}</td>
     <td><button data-prize="${item.id}"${item.practice || item.verificationStatus !== 'verified' ? ' disabled' : ''}>${item.prizeReceived ? '수령' : '미수령'}</button></td>
     <td><button data-edit="${item.id}">수정</button><button class="danger" data-delete="${item.id}">삭제</button></td></tr>`,
@@ -701,7 +705,9 @@ function renderStudents() {
   const filtered = students.filter((student) => {
     const grade = studentGrade(student, sessionPolicy.academicYear);
     return (
-      `${student.student_id} ${student.student_name}`.toLocaleLowerCase().includes(query) &&
+      `${student.login_id ?? ''} ${student.student_id} ${student.student_name}`
+        .toLocaleLowerCase()
+        .includes(query) &&
       (!studentFilter.grade ||
         (studentFilter.grade === 'other' ? grade === null : grade === Number(studentFilter.grade)))
     );
@@ -713,7 +719,7 @@ function renderStudents() {
       .slice((studentPage - 1) * 50, studentPage * 50)
       .map(
         (student) => `<tr>
-      <td>${html(student.student_id)}</td><td>${html(student.student_name)}</td>
+      <td>${html(student.login_id || '미연결')}<small>${html(student.student_id)}</small></td><td>${html(student.student_name)}</td>
       <td>${studentGrade(student, sessionPolicy.academicYear) ?? '—'}</td>
       <td>${student.is_active ? '활성' : '비활성'}</td><td>${writeRestricted(student) ? '제한' : '허용'}</td>
       <td><button data-student="${html(student.student_id)}">상세</button></td></tr>`,

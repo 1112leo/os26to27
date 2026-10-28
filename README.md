@@ -23,9 +23,9 @@ GitHub Pages + Firebase. 학생 화면은 HTML·CSS·JavaScript를 직접 수정
 
 로컬 실행: Node 24 이상에서 `node serve.mjs`. `/typing/`, `/write/`, `/welcome/`으로 접속합니다. `?emulator=1`은 localhost 또는 127.0.0.1에서만 에뮬레이터에 연결하며 기기 보호 정책을 바꾸지 않습니다.
 
-학생 ID는 입학 당시 학번 7자리입니다. 내부 Auth 이메일은 `<학번>@students.<Firebase projectId>.invalid`, UID는 학번이며 이메일은 학생 화면에 표시하지 않습니다. 초기 비밀번호는 최초 계정 생성 시 학번으로 설정합니다. 별도 회원가입이나 최초 변경 강제는 없습니다. ID·초기 비밀번호가 같으므로 계정 기록만으로 실제 작성자를 확정하지 않습니다. Firestore에는 비밀번호나 비밀번호 해시를 저장하지 않습니다.
+학생 로그인 학번은 검증된 현재 5자리 학번입니다. 고정 Auth UID와 기록의 식별자는 입학 당시 7자리 학번을 유지합니다. 현재 학번은 학생 문서의 선택 필드 `login_id`에 저장하고, 내부 Auth 이메일은 `<현재 학번>@students.<Firebase projectId>.invalid`로 연결합니다. 이메일은 학생 화면에 표시하지 않습니다. 현재 번호가 확인되지 않은 계정은 기존 7자리 로그인과 내부 이메일을 유지하며, 입학 당시 반·번호로 현재 번호를 추정하지 않습니다. 초기 비밀번호는 최초 생성 시 입학 당시 7자리 학번으로 설정하며, 5자리 로그인 연결 작업은 비밀번호를 바꾸지 않습니다. 별도 회원가입이나 최초 변경 강제는 없습니다. ID·초기 비밀번호가 같으므로 계정 기록만으로 실제 작성자를 확정하지 않습니다. Firestore에는 비밀번호나 비밀번호 해시를 저장하지 않습니다.
 
-학생 로그인은 Firebase 인증과 `students/{uid}` 명부의 활성 상태를 확인합니다. 이름은 명부에서 읽습니다. 관리자 이메일은 기존 `admins/{uid}.enabled` 권한을 확인한 뒤 해당 기능의 관리자 화면으로 이동합니다. 학생 로그인 시 이전 관리자 세션은 종료합니다. 예전의 학번·이름 입력 세션과 익명 계정은 새 제출에 사용할 수 없습니다.
+5자리 로그인은 인증 후 명부의 `login_id`가 입력한 번호와 일치하는지도 검사합니다. 학생 로그인은 Firebase 인증과 `students/{uid}` 명부의 활성 상태를 확인합니다. 이름은 명부에서 읽습니다. 관리자 이메일은 기존 `admins/{uid}.enabled` 권한을 확인한 뒤 해당 기능의 관리자 화면으로 이동합니다. 학생 로그인 시 이전 관리자 세션은 종료합니다. 예전의 학번·이름 입력 세션과 익명 계정은 새 제출에 사용할 수 없습니다.
 
 글과 타자 기록의 `owner_uid`는 인증 계정이며 타자 `participantId`·`displayName`은 명부의 학번·이름과 일치해야 합니다. 새 글은 승인 대기 상태입니다. 공개 글에는 기존 공개용 본문·별명만 포함하며 학생 명부와 관리 기록은 공개하지 않습니다. 기존 글·타자 기록을 지우거나 새 학생 계정에 자동 귀속하지 않습니다.
 
@@ -41,7 +41,9 @@ GitHub Pages + Firebase. 학생 화면은 HTML·CSS·JavaScript를 직접 수정
 node scripts/import-students.mjs --input PRIVATE_ROSTER.json --project PROJECT_ID --dry-run --admin-module-dir EXTERNAL_NODE_MODULES --report PRIVATE_REPORT.json
 ```
 
-검토한 명부에 `--apply`를 명시해야 계정을 생성합니다. `--only 학번`으로 개별 재시도할 수 있으며 `--concurrency`는 기본 5, 범위 1~10입니다. Auth 생성 후 Firestore 생성이 실패한 경우 다음 실행에서 학생 문서만 복구합니다. 기존 계정 비밀번호·제재 상태·관리자 계정은 변경하지 않습니다. 기본 인증은 Admin SDK의 Application Default Credentials이며, `--credential-module`로 저장소 밖의 자격 증명 모듈을 지정할 수 있습니다. 보고서에는 진행·오류를 남기고 비밀번호는 기록하지 않습니다.
+검토한 명부에 `--apply`를 명시해야 계정을 생성합니다. `--only 학번`으로 개별 재시도할 수 있으며 `--concurrency`는 기본 5, 범위 1~10입니다. Auth 생성 후 Firestore 생성이 실패한 경우 다음 실행에서 학생 문서만 복구합니다. 기존 계정 비밀번호·제재 상태·관리자 계정은 변경하지 않습니다. 현재 학번 연결은 `scripts/link-student-logins.mjs`에서 비공개 `{student_id, login_id}` 연결표와 `--academic-year`를 사용합니다. 중복·학년·기존 계정·번호 충돌을 전체 사전 검사한 후 `--apply`로 이메일과 로그인 번호만 연결합니다. UID·이름·비밀번호·제재 상태·기존 기록은 유지하고, Auth와 명부 사이의 부분 실패는 재실행으로 복구합니다. 기존 명부 등록 스크립트도 이미 연결된 로그인 번호를 보존합니다. 공개 로그인 번호 조회 컬렉션은 만들지 않습니다.
+
+기본 인증은 Admin SDK의 Application Default Credentials이며, `--credential-module`로 저장소 밖의 자격 증명 모듈을 지정할 수 있습니다. 보고서에는 진행·오류를 남기고 비밀번호는 기록하지 않습니다.
 
 기존 관리자 비밀번호 재설정은 Firebase 기본 이메일 링크를 사용합니다. 학생 비밀번호 재발급은 서버 Admin SDK가 필요합니다. `scripts/functions`는 관리자 권한을 확인하고 임시 비밀번호를 한 번만 반환하며 비밀번호를 로그·Firestore에 남기지 않습니다. 현재 무료 요금제 유지 방침에 따라 운영 배포는 보류했고 `studentAdminFunctionsEnabled`를 활성화하지 않습니다. 향후 서버 배포가 완료된 경우에만 이 공개 설정을 `true`로 바꿉니다. Functions 지역을 바꾸면 서버 `STUDENT_FUNCTION_REGION`과 클라이언트 `functionsRegion`을 같이 설정합니다. 학생 상태 관리에는 서버 함수가 필요하지 않습니다.
 

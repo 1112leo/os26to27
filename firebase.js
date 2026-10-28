@@ -229,7 +229,8 @@ export function sessionPolicy(data) {
   };
 }
 export function studentEmail(studentId, projectId) {
-  if (!/^[0-9]{7}$/.test(studentId)) throw new ClientError('학번은 숫자 7자리로 입력하세요.', 400);
+  if (!/^(?:[0-9]{5}|[0-9]{7})$/.test(studentId))
+    throw new ClientError('학번을 확인해 주세요.', 400);
   return `${studentId}@students.${projectId}.invalid`;
 }
 function studentProfile(user, data, projectId) {
@@ -237,7 +238,8 @@ function studentProfile(user, data, projectId) {
     !user ||
     user.isAnonymous ||
     !/^[0-9]{7}$/.test(user.uid) ||
-    user.email !== studentEmail(user.uid, projectId) ||
+    (user.email !== studentEmail(user.uid, projectId) &&
+      (!data?.login_id || user.email !== studentEmail(data.login_id, projectId))) ||
     data?.student_id !== user.uid ||
     data?.is_active !== true ||
     typeof data.student_name !== 'string'
@@ -250,6 +252,7 @@ function studentProfile(user, data, projectId) {
   return {
     uid: user.uid,
     studentId: user.uid,
+    loginId: data.login_id ?? null,
     name: data.student_name,
     admissionYear: data.admission_year,
     writeBlocked:
@@ -279,9 +282,10 @@ export async function loginStudent(id, password) {
         password,
       ),
     );
-    if (user.uid !== id)
+    const profile = await studentSession();
+    if ((id.length === 7 && user.uid !== id) || (id.length === 5 && profile?.loginId !== id))
       throw new ClientError('계정을 사용할 수 없습니다. 운영진에게 문의하세요.', 403);
-    return await studentSession();
+    return profile;
   } catch (reason) {
     await signOut(clients.studentAuth);
     throw firebaseError(reason);
